@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="da">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f1512" />
+    <meta name="description" content="Tag et billede af et printkort, find komponenterne og tegn strømvejene op til fejlsøgning." />
+    <title>PCB Fejlsøgning</title>
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="icon-192.png" />
+    <link rel="manifest" href="manifest.webmanifest" />
+  </head>
+  <body>
+    <!-- Forside -->
+    <section id="home" class="view">
+      <header class="home-header">
+        <div class="brand">
+          <img src="icon.svg" alt="" width="36" height="36" />
+          <div>
+            <h1>PCB Fejlsøgning</h1>
+            <p class="muted">Fotografér printet · find komponenter · tegn strømvejen</p>
+          </div>
+        </div>
+        <button class="icon-btn" id="open-settings" title="Indstillinger" aria-label="Indstillinger">⚙</button>
+      </header>
+
+      <div class="start-actions">
+        <label class="big-btn primary">
+          <span class="big-icon">📷</span>
+          <span><b>Tag billede</b><small>Brug kameraet</small></span>
+          <input type="file" accept="image/*" capture="environment" id="take-photo" hidden />
+        </label>
+        <label class="big-btn">
+          <span class="big-icon">🖼</span>
+          <span><b>Vælg billede</b><small>Fra galleri eller filer</small></span>
+          <input type="file" accept="image/*" id="pick-photo" hidden />
+        </label>
+      </div>
+      <p class="muted small center">
+        Tip: Fotografér printet lige oppefra, i godt lys og uden blitz-refleks. Fyld billedet ud med printet.
+      </p>
+
+      <div class="projects-head">
+        <h2>Projekter</h2>
+        <label class="btn small">
+          Importér
+          <input type="file" accept=".json,application/json" id="import-project" hidden />
+        </label>
+      </div>
+      <ul id="project-list" class="project-list"></ul>
+    </section>
+
+    <!-- Editor -->
+    <section id="editor" class="view" hidden>
+      <header class="ed-header">
+        <button class="icon-btn" id="back" aria-label="Tilbage til projekter" title="Tilbage">‹</button>
+        <input id="project-name" class="name-input" aria-label="Projektnavn" />
+        <div class="ed-actions">
+          <button class="btn icon-only" id="undo" title="Fortryd (Ctrl+Z)" aria-label="Fortryd">↶</button>
+          <button class="btn icon-only" id="redo" title="Gentag (Ctrl+Y)" aria-label="Gentag">↷</button>
+          <button class="btn primary" id="ai-btn" title="Find komponenter med AI">✨ <span class="hide-sm">Find komponenter</span></button>
+          <div class="menu-wrap">
+            <button class="btn icon-only" id="menu-btn" aria-haspopup="true" aria-expanded="false" aria-label="Flere handlinger">⋯</button>
+            <div class="menu" id="menu" hidden>
+              <button data-action="local">🔍 Hurtig lokal søgning (offline)</button>
+              <button data-action="labels">🏷 Vis/skjul etiketter</button>
+              <button data-action="toggle-components">▢ Vis/skjul komponentbokse</button>
+              <button data-action="clear-ai">🧹 Fjern AI-/auto-fundne komponenter</button>
+              <hr />
+              <button data-action="export-png">⬇ Gem annoteret billede (PNG)</button>
+              <button data-action="export-json">⬇ Eksportér projekt (JSON)</button>
+              <hr />
+              <button data-action="settings">⚙ Indstillinger</button>
+              <button data-action="delete" class="danger">🗑 Slet projekt</button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div class="ed-body">
+        <div class="canvas-wrap">
+          <canvas id="board" data-tool="select"></canvas>
+          <div class="zoom-ctrl">
+            <button class="btn icon-only" id="zoom-in" aria-label="Zoom ind">+</button>
+            <button class="btn icon-only" id="zoom-out" aria-label="Zoom ud">−</button>
+            <button class="btn icon-only" id="zoom-fit" aria-label="Tilpas til skærm" title="Tilpas">⤢</button>
+          </div>
+          <div class="hint" id="hint"></div>
+          <div class="trace-bar" id="trace-bar" hidden>
+            <select id="active-net" aria-label="Aktivt net"></select>
+            <button class="btn small" id="trace-undo">↶ Punkt</button>
+            <button class="btn small" id="trace-cancel">Annullér</button>
+            <button class="btn small primary" id="trace-done">Færdig</button>
+          </div>
+          <div class="busy" id="busy" hidden>
+            <div class="spinner"></div>
+            <p id="busy-text">Analyserer …</p>
+            <button class="btn small" id="busy-cancel">Annullér</button>
+          </div>
+        </div>
+        <aside class="panel" id="panel" aria-label="Detaljer"></aside>
+      </div>
+
+      <nav class="toolbar" aria-label="Værktøjer">
+        <button class="tool active" data-tool="select"><span>☝</span>Vælg</button>
+        <button class="tool" data-tool="component"><span>▢</span>Komponent</button>
+        <button class="tool" data-tool="trace"><span>〰</span>Strømvej</button>
+        <button class="tool" data-tool="probe"><span>⊕</span>Måling</button>
+        <button class="tool panel-toggle" id="panel-toggle"><span>☰</span>Detaljer</button>
+      </nav>
+    </section>
+
+    <!-- Indstillinger -->
+    <dialog id="settings-dialog">
+      <form method="dialog" class="dialog-body" id="settings-form">
+        <h2>Indstillinger</h2>
+        <label class="field">
+          <span>Anthropic API-nøgle</span>
+          <input type="password" id="api-key" autocomplete="off" placeholder="sk-ant-…" />
+        </label>
+        <p class="muted small">
+          Bruges til AI-genkendelse af komponenter. Nøglen gemmes kun i denne browser og sendes kun til Anthropic.
+          Opret en nøgle på <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.
+          Brug helst en nøgle med et forbrugsloft.
+        </p>
+        <label class="field">
+          <span>Model</span>
+          <select id="model"></select>
+        </label>
+        <label class="field">
+          <span>Grundighed</span>
+          <select id="effort">
+            <option value="low">Hurtig</option>
+            <option value="medium">Normal</option>
+            <option value="high">Grundig (langsommere)</option>
+          </select>
+        </label>
+        <div class="row end">
+          <button class="btn" value="cancel" formnovalidate>Annullér</button>
+          <button class="btn primary" value="save">Gem</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- AI-dialog -->
+    <dialog id="ai-dialog">
+      <form method="dialog" class="dialog-body">
+        <h2>✨ Find komponenter med AI</h2>
+        <p class="muted small">
+          Billedet sendes til Claude, som finder komponenterne, læser betegnelser og værdier, kigger efter synlige
+          skader og foreslår strømvejene.
+        </p>
+        <label class="field">
+          <span>Hvad ved du om kortet/fejlen? (valgfrit)</span>
+          <textarea id="ai-context" rows="3" placeholder="fx 'Strømforsyning til kaffemaskine, 230V ind, død – ingen LED lyser'"></textarea>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="ai-replace" checked />
+          Erstat tidligere AI-/auto-fundne komponenter (manuelle beholdes)
+        </label>
+        <div class="row end">
+          <button class="btn" value="cancel" formnovalidate>Annullér</button>
+          <button class="btn primary" value="run">Start analyse</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Ny komponent -->
+    <dialog id="comp-dialog">
+      <form method="dialog" class="dialog-body">
+        <h2>Ny komponent</h2>
+        <div class="type-grid" id="type-grid"></div>
+        <div class="row end">
+          <button class="btn" value="cancel" formnovalidate>Annullér</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
