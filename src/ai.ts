@@ -3,7 +3,7 @@ import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
 import { scaledCanvas, toBase64Jpeg } from "./image";
 import type { Settings } from "./store";
-import { COMPONENT_TYPES, uid, type AiResult, type ComponentType, type PcbComponent } from "./types";
+import { COMPONENT_TYPES, uid, type AiResult, type ComponentType, type PcbComponent, type Point, type Probe, type ProbeAnalysis } from "./types";
 
 const TYPE_IDS = COMPONENT_TYPES.map((t) => t.id) as [ComponentType, ...ComponentType[]];
 
@@ -75,36 +75,17 @@ export async function detectWithClaude(
       : "Identificér komponenterne på dette printkort og beskriv strømvejene.") +
     (extraContext.trim() ? `\n\nOplysninger fra brugeren om kortet/fejlen:\n${extraContext.trim()}` : "");
 
-  const useFallbacks = FALLBACK_MODELS.has(settings.model);
-
-  const response = await client.beta.messages.parse(
-    {
-      model: settings.model,
-      max_tokens: 32000,
-      system: SYSTEM_PROMPT,
-      output_config: { effort: settings.effort, format: betaZodOutputFormat(DetectionSchema) },
-      ...(useFallbacks ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const } : {}),
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "image", source: { type: "base64", media_type: "image/jpeg", data } },
-            { type: "text", text: userText },
-          ],
-        },
-      ],
-    },
-    { signal, timeout: 10 * 60 * 1000 },
+  const { out, model } = await callClaude(
+    client,
+    settings,
+    SYSTEM_PROMPT,
+    DetectionSchema,
+    [
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data } },
+      { type: "text", text: userText },
+    ],
+    signal,
   );
-
-  if (response.stop_reason === "refusal") {
-    throw new Error("Modellen afviste at analysere billedet. Prøv et andet billede eller en anden model.");
-  }
-  if (response.stop_reason === "max_tokens") {
-    throw new Error("Svaret blev for langt (for mange komponenter). Prøv at beskære billedet til et mindre område.");
-  }
-  const out = response.parsed_output;
-  if (!out) throw new Error("Kunne ikke fortolke svaret fra modellen.");
 
   const W = image.width;
   const H = image.height;
@@ -144,11 +125,215 @@ export async function detectWithClaude(
         .filter((i) => Number.isInteger(i) && i >= 0 && i < components.length)
         .map((i) => components[i].id),
     })),
-    model: response.model,
+    model,
     at: Date.now(),
   };
 
   return { components, ai };
+}
+
+type UserContent = Anthropic.Beta.Messages.BetaContentBlockParam[];
+
+/** Fælles kald med struktureret output, refusal-fallback og fejlhåndtering. */
+async function callClaude<S extends z.ZodType>(
+  client: Anthropic,
+  settings: Settings,
+  system: string,
+  schema: S,
+  content: UserContent,
+  signal?: AbortSignal,
+): Promise<{ out: z.infer<S>; model: string }> {
+  const useFallbacks = FALLBACK_MODELS.has(settings.model);
+  const response = await client.beta.messages.parse(
+    {
+      model: settings.model,
+      max_tokens: 32000,
+      system,
+      output_config: { effort: settings.effort, format: betaZodOutputFormat(schema) },
+      ...(useFallbacks ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const } : {}),
+      messages: [{ role: "user", content }],
+    },
+    { signal, timeout: 10 * 60 * 1000 },
+  );
+  if (response.stop_reason === "refusal") {
+    throw new Error("Modellen afviste at analysere billedet. Prøv et andet billede eller en anden model.");
+  }
+  if (response.stop_reason === "max_tokens") {
+    throw new Error("Svaret blev for langt. Prøv et nærbillede af et mindre område.");
+  }
+  const out = response.parsed_output as z.infer<S> | null;
+  if (!out) throw new Error("Kunne ikke fortolke svaret fra modellen.");
+  return { out, model: response.model };
+}
+
+// ---------- Fejlanalyse fra et målepunkt ----------
+
+const ProbeAnalysisSchema = z.object({
+  at_point: z.string().describe("Hvad der sidder ved/omkring målepunktet (pad, ben på komponent, via, testpunkt …). Dansk."),
+  net_name: z.string().describe("Bedste gæt på nettets navn, fx 5V, 3V3, VIN, GND. Tom hvis ukendt."),
+  net_voltage: z.string().describe("Forventet spænding på nettet, fx '5V'. Tom hvis ukendt."),
+  traces: z.array(
+    z.object({
+      description: z.string().describe("Hvor banen går hen, fx 'fra målepunktet til ben 3 på U2'. Dansk."),
+      confidence: z.enum(["high", "medium", "low"]),
+      points: z
+        .array(z.object({ x: z.number(), y: z.number() }))
+        .describe("Banens forløb som polylinje i normaliserede koordinater 0-1000 i billedet, startende ved målepunktet."),
+    }),
+  ),
+  connected: z.array(
+    z.object({
+      component_index: z.number().describe("Indeks (#n) i den medsendte komponentliste, eller -1 hvis komponenten ikke er på listen."),
+      designator: z.string().describe("Betegnelse, fx C12. Tom hvis ukendt."),
+      relation: z.string().describe("Hvordan komponenten er forbundet til målepunktet. Dansk."),
+      suspicion: z.enum(["high", "medium", "low"]).describe("Hvor sandsynligt det er at denne komponent forklarer målingen."),
+      reason: z.string().describe("Hvorfor den er (eller ikke er) mistænkt i lyset af målingen. Dansk."),
+      check: z.string().describe("Konkret hvordan brugeren tester komponenten (måling, modstand, diode-test …). Dansk."),
+    }),
+  ),
+  summary: z.string().describe("Samlet vurdering af fejlen ud fra målingen og det du kan se. Dansk."),
+  next_steps: z.array(z.string()).describe("Næste målinger/handlinger i prioriteret rækkefølge. Dansk."),
+});
+
+const PROBE_SYSTEM_PROMPT = `Du er en erfaren elektronikreparatør der hjælper med at fejlsøge et printkort ud fra fotos og brugerens målinger.
+
+Du får to udgaver af samme foto: billede 1 er det rene foto, billede 2 er det samme foto hvor brugerens målepunkt er markeret med en magenta ring med kryds, og kendte komponenter er tegnet med tynde cyan rammer og deres indeks (#n). Brug billede 1 til at se kobberbanerne og billede 2 til at vide hvor målepunktet og komponenterne er.
+
+Opgave:
+1. Beskriv hvad der sidder ved målepunktet.
+2. Følg de synlige kobberbaner fra målepunktet så langt du rent faktisk kan se dem – også under loddestopmasken hvor de anes som lysere/mørkere striber. Angiv hver bane som en polylinje i normaliserede koordinater (0-1000 for både x og y, (0,0) øverst til venstre i billedet) der starter ved målepunktet. Angiv kun baner du kan se; gæt ikke. Hvis en bane forsvinder i en via eller under en komponent, så stop dér og nævn det i beskrivelsen.
+3. Find de komponenter der er forbundet til punktet – direkte eller via banerne – og vurder hvilke der mest sandsynligt forklarer målingen. Brug komponentindeks fra listen når det er muligt.
+4. Giv konkrete næste skridt: hvad skal måles hvor, og hvad forventes.
+
+Vær ærlig om usikkerhed – især hvis banerne ikke er tydelige på fotoet. Skriv på dansk.`;
+
+export interface ProbeAnalysisInput {
+  /** Billedet der analyseres (oversigt eller nærbillede). */
+  image: ImageBitmap;
+  /** Projektkoordinat -> pixel i `image`. */
+  toPixel: (p: Point) => Point;
+  /** Pixel i `image` -> projektkoordinat. */
+  toProject: (p: Point) => Point;
+  probe: Probe;
+  netName: string;
+  components: PcbComponent[];
+  otherProbes: { label: string; net: string; expected: string; measured: string }[];
+  description: string;
+  isDetail: boolean;
+}
+
+export async function analyzeProbe(input: ProbeAnalysisInput, settings: Settings, signal?: AbortSignal): Promise<ProbeAnalysis> {
+  if (!settings.apiKey) throw new Error("Angiv en Anthropic API-nøgle under Indstillinger først.");
+  const { image, toPixel, toProject, probe } = input;
+
+  const clean = scaledCanvas(image, 2000);
+  const s = clean.width / image.width;
+  const W = clean.width;
+  const H = clean.height;
+
+  // Komponenter der (delvist) er synlige i billedet, med indeks.
+  const visible: { idx: number; c: PcbComponent; x0: number; y0: number; x1: number; y1: number }[] = [];
+  input.components.forEach((c, idx) => {
+    const a = toPixel({ x: c.x, y: c.y });
+    const b = toPixel({ x: c.x + c.w, y: c.y + c.h });
+    const x0 = a.x * s, y0 = a.y * s, x1 = b.x * s, y1 = b.y * s;
+    if (x1 < 0 || y1 < 0 || x0 > W || y0 > H) return;
+    visible.push({ idx, c, x0, y0, x1, y1 });
+  });
+
+  // Billede 2: målepunkt og komponenter markeret.
+  const marked = document.createElement("canvas");
+  marked.width = W;
+  marked.height = H;
+  const ctx = marked.getContext("2d")!;
+  ctx.drawImage(clean, 0, 0);
+  const lw = Math.max(1.5, W / 900);
+  ctx.lineWidth = lw;
+  const fontPx = Math.round(Math.max(11, W / 110));
+  ctx.font = `600 ${fontPx}px sans-serif`;
+  ctx.textBaseline = "bottom";
+  for (const v of visible) {
+    ctx.strokeStyle = "#00e5ff";
+    ctx.strokeRect(v.x0, v.y0, v.x1 - v.x0, v.y1 - v.y0);
+    const label = `#${v.idx}`;
+    ctx.fillStyle = "rgba(0,0,0,0.7)";
+    ctx.fillRect(v.x0, v.y0 - fontPx - 2, ctx.measureText(label).width + 4, fontPx + 2);
+    ctx.fillStyle = "#00e5ff";
+    ctx.fillText(label, v.x0 + 2, v.y0);
+  }
+  const pp = toPixel(probe);
+  const px = pp.x * s;
+  const py = pp.y * s;
+  const r = Math.max(10, W / 70);
+  ctx.strokeStyle = "#ff2d95";
+  ctx.lineWidth = lw * 2;
+  ctx.beginPath();
+  ctx.arc(px, py, r, 0, Math.PI * 2);
+  ctx.moveTo(px - r * 1.6, py);
+  ctx.lineTo(px + r * 1.6, py);
+  ctx.moveTo(px, py - r * 1.6);
+  ctx.lineTo(px, py + r * 1.6);
+  ctx.stroke();
+
+  const norm = (v: number, max: number) => Math.round((v / max) * 1000);
+  const compLines = visible.map(
+    (v) =>
+      `#${v.idx}: ${v.c.designator || "?"} – ${v.c.type}${v.c.value ? ` (${v.c.value})` : ""}, status: ${v.c.status}` +
+      `${v.c.notes ? `, noter: ${v.c.notes}` : ""}, boks x ${norm(v.x0, W)}-${norm(v.x1, W)}, y ${norm(v.y0, H)}-${norm(v.y1, H)}`,
+  );
+  const userText = [
+    input.isDetail ? "Fotoet er et nærbillede af et udsnit af printet." : "Fotoet viser hele printet.",
+    `Målepunkt ${probe.label} ligger ved x=${norm(px, W)}, y=${norm(py, H)} (normaliseret).`,
+    `Net: ${input.netName || "ukendt"}. Forventet: ${probe.expected || "ukendt"}. Målt: ${probe.measured || "ikke angivet"}.`,
+    input.description.trim() ? `Brugerens beskrivelse af fejlen:\n${input.description.trim()}` : "",
+    input.otherProbes.length
+      ? `Andre målinger på kortet:\n${input.otherProbes.map((o) => `- ${o.label} (${o.net || "ukendt net"}): forventet ${o.expected || "?"}, målt ${o.measured || "?"}`).join("\n")}`
+      : "",
+    compLines.length ? `Kendte komponenter i billedet:\n${compLines.join("\n")}` : "Ingen komponenter er markeret endnu – beskriv dem du ser med designator og component_index -1.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const client = new Anthropic({ apiKey: settings.apiKey, dangerouslyAllowBrowser: true });
+  const { out, model } = await callClaude(
+    client,
+    settings,
+    PROBE_SYSTEM_PROMPT,
+    ProbeAnalysisSchema,
+    [
+      { type: "text", text: "Billede 1 (rent foto):" },
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: await toBase64Jpeg(clean) } },
+      { type: "text", text: "Billede 2 (målepunkt og komponenter markeret):" },
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: await toBase64Jpeg(marked) } },
+      { type: "text", text: userText },
+    ],
+    signal,
+  );
+
+  const clamp = (v: number) => Math.max(0, Math.min(1000, v));
+  const fromNorm = (pt: { x: number; y: number }) => toProject({ x: ((clamp(pt.x) / 1000) * W) / s, y: ((clamp(pt.y) / 1000) * H) / s });
+  const byIndex = new Map(visible.map((v) => [v.idx, v.c]));
+
+  return {
+    atPoint: out.at_point,
+    netName: out.net_name.trim(),
+    netVoltage: out.net_voltage.trim(),
+    traces: out.traces
+      .filter((t) => t.points.length >= 2)
+      .map((t) => ({ description: t.description, confidence: t.confidence, points: t.points.map(fromNorm) })),
+    suspects: out.connected.map((c) => ({
+      componentId: byIndex.get(c.component_index)?.id ?? "",
+      designator: c.designator.trim() || byIndex.get(c.component_index)?.designator || "",
+      relation: c.relation,
+      suspicion: c.suspicion,
+      reason: c.reason,
+      check: c.check,
+    })),
+    summary: out.summary,
+    nextSteps: out.next_steps,
+    model,
+    at: Date.now(),
+  };
 }
 
 export function describeApiError(err: unknown): string {

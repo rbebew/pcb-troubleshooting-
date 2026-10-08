@@ -1158,3 +1158,28 @@ details.advanced summary {
   top: 4px;
   right: 4px;
 }
+
+/* ---------- AI-fejlanalyse ---------- */
+
+.ai-analysis {
+  margin-top: 12px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.suspects li {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.suspects li:last-child {
+  border-bottom: none;
+}
+.row.between.tight {
+  margin-top: 0;
+}
+.dash-swatch {
+  display: inline-block;
+  width: 22px;
+  height: 0;
+  border-top: 3px dashed #ff2d95;
+  vertical-align: middle;
+}

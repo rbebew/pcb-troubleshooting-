@@ -110,6 +110,29 @@ export interface Probe {
   expected: string;
   measured: string;
   notes: string;
+  /** Seneste AI-fejlanalyse ud fra dette målepunkt. */
+  ai?: ProbeAnalysis;
+}
+
+export interface ProbeAnalysis {
+  atPoint: string;
+  netName: string;
+  netVoltage: string;
+  /** Kobberbaner AI'en har fulgt fra målepunktet (projektkoordinater). */
+  traces: { description: string; confidence: "high" | "medium" | "low"; points: Point[] }[];
+  suspects: {
+    /** Tom hvis komponenten ikke er markeret i projektet. */
+    componentId: string;
+    designator: string;
+    relation: string;
+    suspicion: "high" | "medium" | "low";
+    reason: string;
+    check: string;
+  }[];
+  summary: string;
+  nextSteps: string[];
+  model: string;
+  at: number;
 }
 
 export interface AiPowerPath {

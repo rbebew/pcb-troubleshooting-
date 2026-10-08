@@ -811,6 +811,7 @@ export class Editor {
       showLabels: this.showLabels,
       showComponents: this.showComponents,
     });
+    this.drawProbeAnalysis(ctx);
     ctx.restore();
 
     if (this.placing) {
@@ -867,6 +868,44 @@ export class Editor {
       const t = this.trace(this.selection.id);
       if (t) for (const q of t.points) handle(ctx, this.toScreen(q));
     }
+  }
+
+  /** AI-fejlanalysen for det valgte målepunkt: fulgte baner (stiplet) og mistænkte komponenter. */
+  private drawProbeAnalysis(ctx: CanvasRenderingContext2D): void {
+    if (this.selection?.kind !== "probe") return;
+    const ai = this.probe(this.selection.id)?.ai;
+    if (!ai) return;
+    ctx.save();
+    const color = { high: "#ff453a", medium: "#ffb020", low: "#c7c7cc" } as const;
+    for (const sp of ai.suspects) {
+      const c = sp.componentId ? this.component(sp.componentId) : undefined;
+      if (!c) continue;
+      const a = this.toScreen(c);
+      ctx.setLineDash([5, 4]);
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = color[sp.suspicion];
+      ctx.strokeRect(a.x - 4, a.y - 4, c.w * this.unit + 8, c.h * this.unit + 8);
+    }
+    ctx.setLineDash([9, 6]);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    for (const t of ai.traces) {
+      const pts = t.points.map((q) => this.toScreen(q));
+      if (pts.length < 2) continue;
+      for (const [w, col] of [
+        [6, "rgba(0,0,0,0.7)"],
+        [3.5, "#ff2d95"],
+      ] as const) {
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (const q of pts.slice(1)) ctx.lineTo(q.x, q.y);
+        ctx.lineWidth = w;
+        ctx.strokeStyle = col;
+        ctx.globalAlpha = t.confidence === "low" ? 0.55 : 1;
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
   }
 
   /** Nærbillederne tegnes som stiplede rammer på oversigten. */

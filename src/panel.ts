@@ -23,6 +23,7 @@ const STATUSES: ComponentStatus[] = ["unknown", "ok", "suspect", "faulty"];
 export interface PanelHooks {
   runAi: () => void;
   runLocal: () => void;
+  analyzeProbe: (probeId: string) => void;
 }
 
 /** Sidepanelet: lister og redigering af komponenter, strømveje og målinger. */
@@ -30,6 +31,7 @@ export class Panel {
   tab: Tab = "components";
   private filter = "";
   private lastEditAt = 0;
+  private dirty = false;
   private statusFilter: ComponentStatus | "all" = "all";
 
   constructor(
@@ -43,6 +45,10 @@ export class Panel {
       if ((e.target as HTMLElement).matches("input:not([type=checkbox]):not([type=color]):not([type=search]), textarea")) {
         setTimeout(() => this.render(), 300);
       }
+    });
+    // En gentegning der blev sprunget over mens man skrev, indhentes når man forlader feltet.
+    root.addEventListener("focusout", () => {
+      setTimeout(() => this.dirty && this.render(), 300);
     });
   }
 
@@ -66,8 +72,10 @@ export class Panel {
     const active = document.activeElement;
     if (active instanceof HTMLElement && this.root.contains(active) && active.matches("input[type=text],input:not([type]),textarea")) {
       // Brugeren skriver i et felt – undgå at smide fokus væk.
+      this.dirty = true;
       return;
     }
+    this.dirty = false;
 
     const scroll = this.root.querySelector(".panel-body")?.scrollTop ?? 0;
     const tabs: [Tab, string, number][] = [
@@ -583,14 +591,130 @@ export class Panel {
             ed.project.nets.map((n) => h("option", { value: n.id, selected: n.id === p.netId }, n.name)),
           ),
         ),
-        field("Forventet", h("input", { value: p.expected, placeholder: "fx 3.3V", inputmode: "decimal", oninput: (e: Event) => this.edit(() => (p.expected = val(e))), onchange: () => this.render() })),
-        field("Målt", h("input", { value: p.measured, placeholder: "fx 3.28V", inputmode: "decimal", oninput: (e: Event) => this.edit(() => (p.measured = val(e))), onchange: () => this.render() })),
+        field("Forventet", h("input", { value: p.expected, placeholder: "fx 3.3V", inputmode: "decimal", oninput: (e: Event) => this.edit(() => (p.expected = val(e))) })),
+        field("Målt", h("input", { value: p.measured, placeholder: "fx 3.28V", inputmode: "decimal", oninput: (e: Event) => this.edit(() => (p.measured = val(e))) })),
       ),
       v === "bad" ? h("div", { class: "callout bad" }, "Målingen afviger mere end 10 % fra det forventede.") : null,
       v === "ok" ? h("div", { class: "callout good" }, "Målingen er inden for ±10 %.") : null,
-      field("Noter", h("textarea", { rows: 2, oninput: (e: Event) => this.edit(() => (p.notes = val(e))) }, p.notes)),
-      h("div", { class: "row end" }, h("button", { class: "btn danger small", onclick: () => ed.deleteSelection() }, "Slet")),
+      field(
+        "Beskriv fejlen / noter",
+        h("textarea", { rows: 2, placeholder: "fx 'Ingen 5V her, regulatoren bliver varm'", oninput: (e: Event) => this.edit(() => (p.notes = val(e))) }, p.notes),
+      ),
+      h(
+        "div",
+        { class: "row between" },
+        h("button", { class: "btn primary small", onclick: () => this.hooks.analyzeProbe(p.id) }, p.ai ? "✨ Analysér igen" : "✨ Analysér fejlen herfra"),
+        h("button", { class: "btn danger small", onclick: () => ed.deleteSelection() }, "Slet"),
+      ),
+      p.ai ? this.probeAnalysisView(p) : h("p", { class: "muted small" }, "AI følger de synlige kobberbaner fra punktet og peger på de komponenter, der mest sandsynligt forklarer målingen."),
     );
+  }
+
+  private probeAnalysisView(p: Probe): HTMLElement {
+    const ed = this.ed;
+    const a = p.ai!;
+    const rank = { high: 0, medium: 1, low: 2 } as const;
+    const suspects = [...a.suspects].sort((x, y) => rank[x.suspicion] - rank[y.suspicion]);
+    const suspColor = { high: "#ff453a", medium: "#ffb020", low: "#9aa4b2" } as const;
+    const suspLabel = { high: "Høj", medium: "Middel", low: "Lav" } as const;
+    return h(
+      "div",
+      { class: "ai-analysis" },
+      h("h4", null, "AI-fejlanalyse"),
+      h("p", null, a.summary),
+      a.atPoint ? h("div", { class: "callout" }, h("b", null, "Ved punktet: "), a.atPoint) : null,
+      a.netName ? h("p", { class: "small" }, "Sandsynligt net: ", h("b", null, a.netName), a.netVoltage ? ` (${a.netVoltage})` : "") : null,
+      a.traces.length
+        ? h(
+            "div",
+            { class: "row between" },
+            h("span", { class: "small" }, h("span", { class: "dash-swatch" }), ` ${a.traces.length} ${a.traces.length === 1 ? "bane" : "baner"} fulgt (stiplet på billedet)`),
+            h("button", { class: "btn small", onclick: () => this.tracesToNet(p) }, "Opret som strømvej"),
+          )
+        : h("p", { class: "muted small" }, "AI kunne ikke se kobberbanerne tydeligt fra dette punkt. Prøv et skarpere nærbillede i godt lys."),
+      suspects.length ? h("h4", null, "Mulige fejlkilder") : null,
+      h(
+        "ul",
+        { class: "plain suspects" },
+        suspects.map((sp) => {
+          const c = sp.componentId ? ed.component(sp.componentId) : undefined;
+          return h(
+            "li",
+            null,
+            h(
+              "div",
+              { class: "row between tight" },
+              h(
+                "span",
+                null,
+                h("span", { class: "dot", style: `background:${suspColor[sp.suspicion]}`, title: `Mistanke: ${suspLabel[sp.suspicion]}` }),
+                " ",
+                c
+                  ? h(
+                      "button",
+                      {
+                        class: "link",
+                        onclick: () => {
+                          ed.centerOn(c);
+                          ed.select({ kind: "component", id: c.id });
+                        },
+                      },
+                      h("b", null, c.designator || sp.designator || typeLabel(c.type)),
+                    )
+                  : h("b", null, sp.designator || "Ukendt komponent"),
+                h("span", { class: "muted small" }, ` · ${suspLabel[sp.suspicion]} mistanke`),
+              ),
+              c && c.status !== "suspect" && c.status !== "faulty"
+                ? h(
+                    "button",
+                    {
+                      class: "btn small",
+                      onclick: () => {
+                        this.edit(() => (c.status = "suspect"));
+                        this.render();
+                      },
+                    },
+                    "Markér mistænkt",
+                  )
+                : null,
+            ),
+            h("div", { class: "small" }, sp.relation),
+            h("div", { class: "small muted" }, sp.reason),
+            sp.check ? h("div", { class: "small" }, h("b", null, "Test: "), sp.check) : null,
+          );
+        }),
+      ),
+      a.nextSteps.length ? h("h4", null, "Næste skridt") : null,
+      a.nextSteps.length ? h("ol", { class: "tips" }, a.nextSteps.map((st) => h("li", null, st))) : null,
+      h("p", { class: "muted small" }, `Analyseret med ${a.model}. AI kan tage fejl – især hvis banerne ikke er tydelige på fotoet.`),
+    );
+  }
+
+  /** Gør AI'ens fulgte baner til rigtige strømveje. */
+  private tracesToNet(p: Probe): void {
+    const ed = this.ed;
+    const a = p.ai;
+    if (!a?.traces.length) return;
+    ed.checkpoint();
+    let net = ed.net(p.netId) ?? ed.project.nets.find((n) => a.netName && n.name.toLowerCase() === a.netName.toLowerCase());
+    if (!net) {
+      const name = a.netName || `Net ${ed.project.nets.length + 1}`;
+      const preset = NET_PRESETS.find((x) => x.name.toLowerCase() === name.toLowerCase());
+      net = {
+        id: uid(),
+        name,
+        voltage: a.netVoltage || preset?.voltage || "",
+        color: preset?.color ?? EXTRA_NET_COLORS[ed.project.nets.length % EXTRA_NET_COLORS.length],
+        visible: true,
+      };
+      ed.project.nets.push(net);
+    }
+    for (const t of a.traces) ed.project.traces.push({ id: uid(), netId: net.id, points: t.points.map((q) => ({ ...q })) });
+    a.traces = [];
+    if (!p.netId) p.netId = net.id;
+    ed.focusNetId = net.id;
+    ed.changed();
+    this.render();
   }
 
   // ---------- Overblik ----------

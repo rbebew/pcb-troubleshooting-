@@ -1,5 +1,5 @@
 import "./style.css";
-import { describeApiError, detectWithClaude } from "./ai";
+import { analyzeProbe, describeApiError, detectWithClaude } from "./ai";
 import { $, download, formatDate, h, toast } from "./dom";
 import { Editor, type Tool } from "./editor";
 import { nextDesignator } from "./geometry";
@@ -139,7 +139,7 @@ async function openProject(id: string): Promise<void> {
 
   const ed = new Editor($("#board") as HTMLCanvasElement, p, image);
   editor = ed;
-  panel = new Panel($("#panel"), ed, { runAi: openAiDialog, runLocal: runLocalDetect });
+  panel = new Panel($("#panel"), ed, { runAi: openAiDialog, runLocal: runLocalDetect, analyzeProbe: runProbeAnalysis });
   ($("#project-name") as HTMLInputElement).value = p.name;
 
   let lastSel = "";
@@ -525,6 +525,80 @@ async function runAi(): Promise<void> {
     if (isNarrow()) setPanelOpen(true);
     const damaged = components.filter((c) => c.damage).length;
     toast(`Fandt ${components.length} komponenter${damaged ? ` – ${damaged} med synlige skader` : ""}.`);
+  } catch (err) {
+    if (ctrl.signal.aborted) toast("Analysen blev annulleret.");
+    else {
+      console.error(err);
+      toast(describeApiError(err), "error", 8000);
+    }
+  } finally {
+    done();
+  }
+}
+
+/** AI-fejlanalyse fra et målepunkt: følger banerne og peger på mulige fejlkilder. */
+async function runProbeAnalysis(probeId: string): Promise<void> {
+  const ed = editor;
+  const probe = ed?.probe(probeId);
+  if (!ed || !probe) return;
+  if (!settings.apiKey) {
+    toast("Angiv din Anthropic API-nøgle først.");
+    openSettings();
+    return;
+  }
+  flushSave();
+
+  // Brug det skarpeste billede der viser punktet: et nærbillede hvis muligt, ellers oversigten.
+  let photo: DetailPhoto | null = null;
+  for (const ph of ed.project.photos ?? []) {
+    const r = ph.region;
+    const m = Math.min(r.w, r.h) * 0.03;
+    const inside = probe.x >= r.x + m && probe.x <= r.x + r.w - m && probe.y >= r.y + m && probe.y <= r.y + r.h - m;
+    if (!inside || !(bitmaps.has(ph.id) || availablePhotoIds.has(ph.id))) continue;
+    if (!photo || ph.width / ph.region.w > photo.width / photo.region.w) photo = ph;
+  }
+  const image = photo ? await photoBitmap(photo.id) : bitmaps.get("")!;
+  if (!image || editor !== ed) return;
+  const k = photo ? image.width / photo.region.w : 1;
+  const ox = photo?.region.x ?? 0;
+  const oy = photo?.region.y ?? 0;
+
+  const net = ed.net(probe.netId);
+  const ctrl = new AbortController();
+  const done = showBusy(`Claude følger banerne fra ${probe.label}${photo ? ` på "${photo.name}"` : ""} …`, () => ctrl.abort());
+  try {
+    const result = await analyzeProbe(
+      {
+        image,
+        toPixel: (p) => ({ x: (p.x - ox) * k, y: (p.y - oy) * k }),
+        toProject: (p) => ({ x: p.x / k + ox, y: p.y / k + oy }),
+        probe,
+        netName: net?.name ?? "",
+        components: ed.project.components,
+        otherProbes: ed.project.probes
+          .filter((x) => x.id !== probe.id && (x.measured || x.expected))
+          .map((x) => ({ label: x.label, net: ed.net(x.netId)?.name ?? "", expected: x.expected, measured: x.measured })),
+        description: probe.notes,
+        isDetail: !!photo,
+      },
+      settings,
+      ctrl.signal,
+    );
+    if (editor !== ed || !ed.probe(probeId)) return;
+    ed.checkpoint();
+    ed.probe(probeId)!.ai = result;
+    ed.changed();
+    if ((ed.photo?.id ?? null) !== (photo?.id ?? null)) await showPhoto(photo?.id ?? null);
+    ed.select({ kind: "probe", id: probeId });
+    ed.centerOn({ x: probe.x - 40 / k, y: probe.y - 40 / k, w: 80 / k, h: 80 / k });
+    if (isNarrow()) setPanelOpen(true);
+    const high = result.suspects.filter((x) => x.suspicion === "high").length;
+    toast(
+      `Analyse færdig: ${result.traces.length} ${result.traces.length === 1 ? "bane" : "baner"} fulgt, ` +
+        `${result.suspects.length} mulige fejlkilder${high ? ` (${high} med høj mistanke)` : ""}.`,
+      "info",
+      6000,
+    );
   } catch (err) {
     if (ctrl.signal.aborted) toast("Analysen blev annulleret.");
     else {

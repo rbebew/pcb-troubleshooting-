@@ -16,6 +16,7 @@ straks dukker op på computeren, og markeringer synkroniseres begge veje.
 |---|---|
 | 📷 **Kamera** | Åbner bagkameraet direkte på mobilen. Billeder roteres efter EXIF og skaleres til max 3000 px. |
 | ✨ **AI-genkendelse** | Claude finder komponenter, læser betegnelser (R12, U3 …) og påtryk, vurderer typen, noterer **synlige skader** (brændt, bulnet, revnet) og foreslår strømvejene. |
+| 🩺 **AI-fejlanalyse fra målepunkt** | Sæt et målepunkt hvor du har målt fejlen, skriv forventet/målt spænding og hvad der er galt, og tryk **✨ Analysér fejlen herfra**. AI følger de synlige kobberbaner fra punktet (vist stiplet), finder de forbundne komponenter, rangerer de mest sandsynlige fejlkilder og foreslår næste målinger. Banerne kan med ét tryk gøres til en rigtig strømvej. Analysen bruger automatisk det skarpeste nærbillede der viser punktet. |
 | 🔎 **Nærbilleder** | Tag et overbliksbillede og derefter nærbilleder af sektioner. Hvert nærbillede lægges (halvgennemsigtigt) over det sted på oversigten det viser. Alle markeringer deles – en komponent tegnet på et nærbillede vises også på oversigten, og strømveje tegnet på oversigten vises på nærbillederne. AI på et nærbillede læser små SMD-mærkninger meget bedre. |
 | 🔗 **Forbind enheder** | Par mobil og computer med en QR-kode. Billeder, nærbilleder, komponenter, strømveje og målinger synkroniseres automatisk, direkte mellem enhederne. |
 | 🔍 **Offline-søgning** | Finder komponenter ud fra farveforskel til loddestopmasken – virker uden internet og API-nøgle. |
