@@ -149,13 +149,23 @@ function startCard(hooks: GuideHooks, rerender: () => void): HTMLElement {
 
 function stepCard(ed: Editor, step: GuideStep, n: number, hooks: GuideHooks): HTMLElement {
   const m = METER_MODES[step.mode];
-  const numeric = step.mode === "dc_voltage" || step.mode === "ac_voltage" || step.mode === "resistance" || step.mode === "current" || step.mode === "diode";
-  const input = h("input", { placeholder: numeric ? `fx ${step.expected}` : "Hvad skete der?", inputmode: numeric ? "decimal" : "text", "aria-label": "Måleresultat" });
+  // Almindeligt tekstfelt (ikke tal-tastatur), så man kan skrive enheder som k og Ω – og et rigtigt svar,
+  // fx "22,6 kΩ, men værdien stiger stadig" eller "kan ikke finde testpunktet, men ...".
+  const input = h("textarea", {
+    rows: 2,
+    placeholder: "Skriv målingen eller et svar, fx '22,6k – stiger langsomt' eller 'kan ikke finde testpunktet'",
+    autocomplete: "off",
+    "aria-label": "Måleresultat eller svar",
+  });
   const send = (v: string) => {
     if (v.trim()) hooks.answerGuide(v.trim(), false);
   };
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") send(input.value);
+    // Enter sender på computer; Shift+Enter giver ny linje. På mobil bruges Næste-knappen.
+    if (e.key === "Enter" && !e.shiftKey && !(navigator as Navigator & { userAgentData?: { mobile?: boolean } }).userAgentData?.mobile) {
+      e.preventDefault();
+      send(input.value);
+    }
   });
   const center = () => frameGuideStep(ed, step);
   return h(
@@ -188,7 +198,7 @@ function stepCard(ed: Editor, step: GuideStep, n: number, hooks: GuideHooks): HT
         )
       : null,
     h("details", null, h("summary", null, `Sådan stiller du multimeteret (${m.symbol})`), h("p", { class: "small" }, m.tip)),
-    h("label", { class: "field" }, h("span", null, "Hvad viser multimeteret?"), input),
+    h("label", { class: "field" }, h("span", null, "Hvad viser multimeteret? (eller skriv et svar/spørgsmål til AI)"), input),
     h(
       "div",
       { class: "row wrap tight" },

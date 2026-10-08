@@ -889,6 +889,12 @@ function endGuide(): void {
   ed.changed();
 }
 
+/** Første måleværdi i et frit svar, fx "22,6 kΩ – stiger" -> "22,6 kΩ", "4k7 ok" -> "4k7", "OL" -> "OL". */
+function leadingValue(text: string): string | null {
+  const m = text.trim().match(/^(OL\b|\d+[RkKM]\d+|[-+]?\d+(?:[.,]\d+)?\s*(?:meg|[mkKMR])?\s*(?:Ω|ohm|mV|V)?)/i);
+  return m ? m[1].trim() : null;
+}
+
 /** Brugerens svar på det aktuelle skridt: gem det, registrér målingen og hent næste skridt. */
 function answerGuide(result: string, skipped: boolean): void {
   const ed = editor;
@@ -910,8 +916,9 @@ function answerGuide(result: string, skipped: boolean): void {
       netId: net?.id ?? "",
       kind: step.mode === "resistance" ? "resistance" : "voltage",
       expected: step.expected,
-      measured: result,
-      notes: step.title,
+      // Svaret kan være fri tekst ("22,6k – stiger langsomt"); selve værdien bruges til grøn/rød.
+      measured: leadingValue(result) ?? result,
+      notes: leadingValue(result) && leadingValue(result) !== result.trim() ? `${step.title} – ${result}` : step.title,
     });
   }
   if (!skipped && step.mode === "continuity" && /^(bip|ja|yes|beep)/i.test(result) && net) {
