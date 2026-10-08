@@ -2,7 +2,6 @@ name: Deploy til GitHub Pages
 
 on:
   push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -30,8 +29,10 @@ jobs:
         with:
           path: dist
 
+  # Udgiv kun fra repositoriets standardbranch (andre branches bliver bare testet).
   deploy:
     needs: build
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     environment:
       name: github-pages

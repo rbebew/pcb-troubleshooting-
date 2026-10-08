@@ -83,8 +83,9 @@ og brug fx en tunnel med HTTPS, eller vælg billedet fra galleriet.
 
 ### Udgivelse på GitHub Pages
 
-Workflowet `.github/workflows/deploy.yml` bygger og udgiver appen ved push til `main`.
-Slå det til under **Settings → Pages → Source: GitHub Actions**. Appen ligger derefter på
+Workflowet `.github/workflows/deploy.yml` tester og bygger ved hvert push og udgiver appen fra repositoriets
+standardbranch. Slå GitHub Pages til under **Settings → Pages → Source: GitHub Actions** og kør derefter workflowet
+igen (**Actions → Deploy til GitHub Pages → Run workflow**). Appen ligger derefter på
 `https://<bruger>.github.io/<repo>/`.
 
 ### Struktur
