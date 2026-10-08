@@ -16,6 +16,8 @@ straks dukker op på computeren, og markeringer synkroniseres begge veje.
 |---|---|
 | 📷 **Kamera** | Åbner bagkameraet direkte på mobilen. Billeder roteres efter EXIF og skaleres til max 3000 px. |
 | ✨ **AI-genkendelse** | Claude finder komponenter, læser betegnelser (R12, U3 …) og påtryk, vurderer typen, noterer **synlige skader** (brændt, bulnet, revnet) og foreslår strømvejene. |
+| 🧭 **Fejlsøgningsguide** | AI guider dig med multimeteret ét skridt ad gangen: hvor den **røde** og **sorte** probe skal sættes (vist på billedet), hvilken indstilling (V, Ω, gennemgang, diodetest …), om strømmen skal være til eller fra, hvad du bør måle, og hvad resultatet betyder. Du skriver hvad du målte, og AI vælger næste skridt – til den finder den defekte komponent eller kortslutningen. Følger kendte metoder: følg strømvejen fra indgangen, modstand fra forsyning til GND, opdeling af kortsluttede skinner, spændingsfaldsmetoden og strøminjektion. Bekræftede forbindelser (bip) bliver automatisk til strømveje, og målinger gemmes som målepunkter. |
+| 🔬 **Små komponenter** | "Grundig" og "Meget grundig" analyse deler billedet i 2×2 eller 3×3 overlappende felter, der hver analyseres i fuld opløsning, så også 0402/0201-komponenter kommer med. Resultaterne flettes uden dubletter. Fotos gemmes i op til 4096 px. |
 | 🩺 **AI-fejlanalyse fra målepunkt** | Sæt et målepunkt hvor du har målt fejlen, skriv forventet/målt spænding og hvad der er galt, og tryk **✨ Analysér fejlen herfra**. AI følger de synlige kobberbaner fra punktet (vist stiplet), finder de forbundne komponenter, rangerer de mest sandsynlige fejlkilder og foreslår næste målinger. Banerne kan med ét tryk gøres til en rigtig strømvej. Analysen bruger automatisk det skarpeste nærbillede der viser punktet. |
 | ✂ **Automatisk beskæring** | Når du tager et nyt billede, finder appen selv printets kanter og foreslår at skære bord og baggrund væk. Kan også bruges på nærbilleder (⋯ → Beskær billedet), og AI kan finde kanterne hvis det ikke lykkes. Markeringerne flyttes med. |
 | 🧩 **Automatisk placering af nærbilleder** | Appen finder selv hvor et nærbillede hører hjemme på oversigten – også hvis det er drejet – ved billedmatching direkte på enheden. Er den i tvivl, spørger den Claude om det omtrentlige sted og finjusterer derefter. |
@@ -25,7 +27,7 @@ straks dukker op på computeren, og markeringer synkroniseres begge veje.
 | ▢ **Manuel redigering** | Tegn, flyt og tilpas bokse; vælg type, betegnelse og værdi. |
 | 〰 **Strømveje** | Tegn baner punkt for punkt med snap til andre baner, målepunkter og komponenter. Net med navn, farve og spænding (VIN, 5V, 3V3, GND …). |
 | 🎯 **Fokus** | Fremhæv ét net og få en nummereret liste over komponenterne langs strømvejen, med hurtig-knapper til status. |
-| ⊕ **Målinger** | Målepunkter med forventet/målt spænding – bliver grønne (±10 %) eller røde. |
+| ⊕ **Målinger** | Målepunkter for spænding (V) eller modstand (Ω) med forventet/målt værdi – bliver grønne eller røde. Forstår fx `3,3V`, `11-12,5V`, `4,7k`, `4k7`, `220R`, `OL`, "over 100 Ω" og "under 5 Ω". |
 | ↶ **Fortryd/gentag** | For alle ændringer. |
 | ⬇ **Eksport** | Annoteret billede som PNG og hele projektet som JSON (kan importeres igen på en anden enhed). |
 | 📱 **PWA** | Kan installeres på hjemmeskærmen og virker offline (undtagen AI). |
@@ -98,7 +100,9 @@ src/
   main.ts         Forside, dialoger, eksport, tastatur
   editor.ts       Canvas: zoom/pan, værktøjer, tegning, fortryd
   panel.ts        Sidepanel: komponenter, strømveje, målinger, overblik
-  ai.ts           Komponent-genkendelse med Claude (struktureret output)
+  ai.ts           Claude: komponenter (evt. i felter), fejlanalyse, guide, placering, beskæring
+  detectMerge.ts  Opdeling i felter og sammenfletning af fund uden dubletter
+  guidePanel.ts   Fejlsøgningsguidens panel
   sync.ts         Synkronisering mellem enheder (PeerJS/WebRTC)
   connect.ts      Dialogen "Forbind enheder" (QR-kode/parring)
   localDetect.ts  Offline komponent-søgning og printkant-detektering (farve-segmentering)

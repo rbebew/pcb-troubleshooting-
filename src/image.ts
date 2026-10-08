@@ -1,5 +1,8 @@
-/** Indlæser et foto (med korrekt EXIF-rotation) og skalerer det ned til max `maxSide` pixels. */
-export async function loadAndResize(file: Blob, maxSide = 3000): Promise<{ blob: Blob; width: number; height: number }> {
+/**
+ * Indlæser et foto (med korrekt EXIF-rotation) og skalerer det ned til max `maxSide` pixels.
+ * 4096 px bevarer en almindelig 12 MP-mobilkameraopløsning, så selv 0402-komponenter kan analyseres.
+ */
+export async function loadAndResize(file: Blob, maxSide = 4096): Promise<{ blob: Blob; width: number; height: number }> {
   const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
   const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
   const width = Math.round(bmp.width * scale);

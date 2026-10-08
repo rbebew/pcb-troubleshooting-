@@ -52,3 +52,34 @@ describe("nextDesignator", () => {
     expect(nextDesignator("U", [])).toBe("U1");
   });
 });
+
+import { parseExpectation, parseResistance } from "../src/geometry";
+
+describe("modstand", () => {
+  it("forstår almindelige skrivemåder", () => {
+    expect(parseResistance("0,8 Ω")).toBeCloseTo(0.8);
+    expect(parseResistance("220R")).toBe(220);
+    expect(parseResistance("4,7k")).toBe(4700);
+    expect(parseResistance("4k7")).toBe(4700);
+    expect(parseResistance("10 kΩ")).toBe(10000);
+    expect(parseResistance("1M5")).toBe(1500000);
+    expect(parseResistance("OL")).toBe(Infinity);
+    expect(parseResistance("bip")).toBeNull();
+  });
+
+  it("vurderer modstandsmålinger", () => {
+    expect(probeVerdict({ kind: "resistance", expected: "4,7k", measured: "4650" })).toBe("ok");
+    expect(probeVerdict({ kind: "resistance", expected: "4,7k", measured: "2,2k" })).toBe("bad");
+    expect(probeVerdict({ kind: "resistance", expected: "over 100 Ω (stiger langsomt pga. C1)", measured: "0,8" })).toBe("bad");
+    expect(probeVerdict({ kind: "resistance", expected: "over 100 Ω", measured: "OL" })).toBe("ok");
+    expect(probeVerdict({ kind: "resistance", expected: "under 5", measured: "0,3 Ω" })).toBe("ok");
+    expect(probeVerdict({ kind: "resistance", expected: "OL", measured: "12k" })).toBe("bad");
+  });
+
+  it("forstår intervaller og 'ca.' for spænding", () => {
+    expect(parseExpectation("11,5-12,5 V", "voltage")).toEqual({ op: "range", value: 11.5, max: 12.5 });
+    expect(probeVerdict({ expected: "ca. 5 V", measured: "4,9" })).toBe("ok");
+    expect(probeVerdict({ expected: "11,5-12,5 V", measured: "12" })).toBe("ok");
+    expect(probeVerdict({ expected: "11,5-12,5 V", measured: "9,8" })).toBe("bad");
+  });
+});

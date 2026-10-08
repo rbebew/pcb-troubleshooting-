@@ -46,6 +46,8 @@ export class Editor {
   focusNetId: string | null = null;
   draft: Point[] | null = null;
   showLabels = true;
+  /** Hvor meget af lærredet forneden der er dækket (af detaljepanelet på mobil). */
+  viewInsetBottom = 0;
   showComponents = true;
 
   private hover: Point | null = null;
@@ -243,10 +245,13 @@ export class Editor {
     const w = (r.w ?? 0) * k;
     const hh = (r.h ?? 0) * k;
     const c = this.mapIn({ x: r.x + (r.w ?? 0) / 2, y: r.y + (r.h ?? 0) / 2 });
-    const target = Math.min(this.viewW / Math.max(w * 4, 80), this.viewH / Math.max(hh * 4, 80));
+    // Øverst ligger billedvælger og hjælpetekst, forneden evt. panelet på mobil.
+    const top = Math.min(100, this.viewH * 0.15);
+    const visibleH = Math.max(120, this.viewH - this.viewInsetBottom - top);
+    const target = Math.min(this.viewW / Math.max(w * 4, 80), visibleH / Math.max(hh * 4, 80));
     if (this.scale < target * 0.6 || this.scale > target * 3) this.scale = target;
     this.tx = this.viewW / 2 - c.x * this.scale;
-    this.ty = this.viewH / 2 - c.y * this.scale;
+    this.ty = top + visibleH / 2 - c.y * this.scale;
     this.requestDraw();
   }
 
@@ -851,6 +856,7 @@ export class Editor {
       showComponents: this.showComponents,
     });
     this.drawProbeAnalysis(ctx);
+    this.drawGuideStep(ctx);
     ctx.restore();
 
     if (this.placing) {
@@ -918,6 +924,54 @@ export class Editor {
       const t = this.trace(this.selection.id);
       if (t) for (const q of t.points) handle(ctx, this.toScreen(q));
     }
+  }
+
+  /** Fejlsøgningsguidens aktuelle måling: hvor den røde og sorte probe skal sættes. */
+  private drawGuideStep(ctx: CanvasRenderingContext2D): void {
+    const g = this.project.guide;
+    if (!g || g.conclusion) return;
+    const st = g.steps[g.steps.length - 1];
+    if (!st || st.result !== undefined) return;
+    const r = this.toScreen(st.red);
+    const b = this.toScreen(st.black);
+    ctx.save();
+    ctx.setLineDash([6, 5]);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(255,255,255,0.8)";
+    ctx.beginPath();
+    ctx.moveTo(b.x, b.y);
+    ctx.lineTo(r.x, r.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const pin = (p: Point, fill: string, sign: string, label: string) => {
+      // Ekstra ring så punktet er let at finde.
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 15, 0, Math.PI * 2);
+      ctx.strokeStyle = fill === "#1c1c1e" ? "rgba(255,255,255,0.9)" : fill;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 9, 0, Math.PI * 2);
+      ctx.fillStyle = fill;
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#fff";
+      ctx.stroke();
+      ctx.fillStyle = "#fff";
+      ctx.font = "700 13px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(sign, p.x, p.y + 0.5);
+      ctx.font = "700 11px system-ui, sans-serif";
+      const tw = ctx.measureText(label).width;
+      ctx.fillStyle = "rgba(0,0,0,0.75)";
+      ctx.fillRect(p.x - tw / 2 - 4, p.y + 20, tw + 8, 16);
+      ctx.fillStyle = fill === "#1c1c1e" ? "#fff" : fill;
+      ctx.fillText(label, p.x, p.y + 28);
+    };
+    pin(b, "#1c1c1e", "−", "SORT");
+    pin(r, "#ff3b30", "+", "RØD");
+    ctx.restore();
   }
 
   /** AI-fejlanalysen for det valgte målepunkt: fulgte baner (stiplet) og mistænkte komponenter. */
@@ -1101,7 +1155,8 @@ function renderOverlay(ctx: CanvasRenderingContext2D, project: Project, o: Overl
     ctx.lineTo(s.x, s.y + 3);
     ctx.lineWidth = 1.5;
     ctx.stroke();
-    const text = p.measured ? `${p.label}: ${p.measured}` : p.label;
+    const unit = p.kind === "resistance" && p.measured && !/[Ωa-z]\s*$/i.test(p.measured) ? " Ω" : "";
+    const text = p.measured ? `${p.label}: ${p.measured}${unit}` : p.label;
     const tw = ctx.measureText(text).width;
     ctx.fillStyle = "rgba(0,0,0,0.75)";
     ctx.fillRect(s.x + 11, s.y - 8, tw + 8, 16);

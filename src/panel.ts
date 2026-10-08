@@ -1,4 +1,5 @@
 import { h } from "./dom";
+import { renderGuide, type GuideHooks } from "./guidePanel";
 import type { Editor } from "./editor";
 import { componentsAlongNet, probeVerdict } from "./geometry";
 import {
@@ -16,11 +17,11 @@ import {
   type Trace,
 } from "./types";
 
-export type Tab = "components" | "nets" | "probes" | "overview";
+export type Tab = "components" | "nets" | "probes" | "guide" | "overview";
 
 const STATUSES: ComponentStatus[] = ["unknown", "ok", "suspect", "faulty"];
 
-export interface PanelHooks {
+export interface PanelHooks extends GuideHooks {
   runAi: () => void;
   runLocal: () => void;
   analyzeProbe: (probeId: string) => void;
@@ -82,6 +83,7 @@ export class Panel {
       ["components", "Komponenter", this.ed.project.components.length],
       ["nets", "Strømveje", this.ed.project.nets.length],
       ["probes", "Målinger", this.ed.project.probes.length],
+      ["guide", "🧭 Guide", 0],
       ["overview", "Overblik", 0],
     ];
     const body = h("div", { class: "panel-body" });
@@ -89,6 +91,7 @@ export class Panel {
     if (this.tab === "nets") this.renderNets(body);
     if (this.tab === "probes") this.renderProbes(body);
     if (this.tab === "overview") this.renderOverview(body);
+    if (this.tab === "guide") renderGuide(body, this.ed, this.hooks, () => this.render());
 
     this.root.replaceChildren(
       h(
@@ -571,6 +574,30 @@ export class Panel {
       h("div", { class: "form-head" }, h("h3", null, verdictDot(p), " Målepunkt"), h("button", { class: "icon-btn", "aria-label": "Luk", onclick: () => ed.select(null) }, "✕")),
       h(
         "div",
+        { class: "seg", role: "radiogroup", "aria-label": "Måletype" },
+        (
+          [
+            ["voltage", "Spænding (V)"],
+            ["resistance", "Modstand (Ω)"],
+          ] as const
+        ).map(([k, label]) =>
+          h(
+            "button",
+            {
+              class: (p.kind ?? "voltage") === k ? "on" : "",
+              role: "radio",
+              "aria-checked": String((p.kind ?? "voltage") === k),
+              onclick: () => {
+                this.edit(() => (p.kind = k));
+                this.render();
+              },
+            },
+            label,
+          ),
+        ),
+      ),
+      h(
+        "div",
         { class: "grid2" },
         field("Navn", h("input", { value: p.label, oninput: (e: Event) => this.edit(() => (p.label = val(e))) })),
         field(
@@ -582,7 +609,7 @@ export class Panel {
                 this.edit(() => {
                   p.netId = val(e);
                   const n = ed.net(p.netId);
-                  if (n && !p.expected) p.expected = n.voltage;
+                  if (n && !p.expected && (p.kind ?? "voltage") === "voltage") p.expected = n.voltage;
                 });
                 this.render();
               },
@@ -591,11 +618,26 @@ export class Panel {
             ed.project.nets.map((n) => h("option", { value: n.id, selected: n.id === p.netId }, n.name)),
           ),
         ),
-        field("Forventet", h("input", { value: p.expected, placeholder: "fx 3.3V", inputmode: "decimal", oninput: (e: Event) => this.edit(() => (p.expected = val(e))) })),
-        field("Målt", h("input", { value: p.measured, placeholder: "fx 3.28V", inputmode: "decimal", oninput: (e: Event) => this.edit(() => (p.measured = val(e))) })),
+        field(
+          "Forventet",
+          h("input", {
+            value: p.expected,
+            placeholder: p.kind === "resistance" ? "fx 4,7k · over 100 · OL" : "fx 3,3V · 11-12,5V",
+            oninput: (e: Event) => this.edit(() => (p.expected = val(e))),
+          }),
+        ),
+        field(
+          "Målt",
+          h("input", {
+            value: p.measured,
+            placeholder: p.kind === "resistance" ? "fx 4,65k · 0,8 · OL" : "fx 3,28V",
+            oninput: (e: Event) => this.edit(() => (p.measured = val(e))),
+          }),
+        ),
       ),
-      v === "bad" ? h("div", { class: "callout bad" }, "Målingen afviger mere end 10 % fra det forventede.") : null,
-      v === "ok" ? h("div", { class: "callout good" }, "Målingen er inden for ±10 %.") : null,
+      p.kind === "resistance" ? h("p", { class: "muted small" }, "Mål modstand uden strøm på kortet. Skriv k for kΩ og M for MΩ (fx 4,7k eller 4k7), OL for uendelig. Forventning kan også være “over 100” eller “under 5”.") : null,
+      v === "bad" ? h("div", { class: "callout bad" }, "Målingen ligger uden for det forventede.") : null,
+      v === "ok" ? h("div", { class: "callout good" }, "Målingen er som forventet (±10 %).") : null,
       field(
         "Beskriv fejlen / noter",
         h("textarea", { rows: 2, placeholder: "fx 'Ingen 5V her, regulatoren bliver varm'", oninput: (e: Event) => this.edit(() => (p.notes = val(e))) }, p.notes),

@@ -1,9 +1,25 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
+import { makeTiles, mergeDetections, type TileDetection } from "./detectMerge";
 import { scaledCanvas, toBase64Jpeg } from "./image";
 import type { Settings } from "./store";
-import { COMPONENT_TYPES, uid, type AiResult, type ComponentType, type PcbComponent, type Point, type Probe, type ProbeAnalysis } from "./types";
+import {
+  COMPONENT_TYPES,
+  GUIDE_GOALS,
+  METER_MODES,
+  uid,
+  type AiResult,
+  type ComponentType,
+  type Guide,
+  type GuideStep,
+  type MeterMode,
+  type PcbComponent,
+  type Point,
+  type Probe,
+  type ProbeAnalysis,
+  type Rect,
+} from "./types";
 
 const TYPE_IDS = COMPONENT_TYPES.map((t) => t.id) as [ComponentType, ...ComponentType[]];
 
@@ -55,25 +71,106 @@ export interface DetectionOutput {
 
 const FALLBACK_MODELS = new Set(["claude-opus-5-5", "claude-sonnet-5-5"]);
 
+/** Hvor grundigt billedet analyseres: 1 = hele billedet på én gang, 2 = 2×2 felter, 3 = 3×3 felter. */
+export type DetailLevel = 1 | 2 | 3;
+
+export interface DetectProgress {
+  done: number;
+  total: number;
+}
+
+/**
+ * Finder komponenter med Claude. Ved detaljegrad 2-3 analyseres billedet desuden i overlappende
+ * felter i fuld opløsning, så også meget små SMD-komponenter (0402/0201) kommer med; resultaterne
+ * flettes sammen uden dubletter.
+ */
 export async function detectWithClaude(
   image: ImageBitmap,
   settings: Settings,
   extraContext: string,
   signal?: AbortSignal,
   isDetail = false,
+  detail: DetailLevel = 1,
+  onProgress?: (p: DetectProgress) => void,
 ): Promise<DetectionOutput> {
   if (!settings.apiKey) throw new Error("Angiv en Anthropic API-nøgle under Indstillinger først.");
-
-  const canvas = scaledCanvas(image, 2000);
-  const data = await toBase64Jpeg(canvas);
-
   const client = new Anthropic({ apiKey: settings.apiKey, dangerouslyAllowBrowser: true });
+  const context = extraContext.trim() ? `\n\nOplysninger fra brugeren om kortet/fejlen:\n${extraContext.trim()}` : "";
+  const W = image.width;
+  const H = image.height;
 
-  const userText =
+  const tiles = detail > 1 ? makeTiles(W, H, detail) : [];
+  const total = 1 + tiles.length;
+  let done = 0;
+  const tick = () => onProgress?.({ done: ++done, total });
+  onProgress?.({ done: 0, total });
+
+  // Hele billedet: giver overblik, strømveje og de store komponenter.
+  const wholeText =
     (isDetail
       ? "Dette er et nærbillede af et udsnit af printkortet. Identificér komponenterne i udsnittet – medtag kun komponenter der er mindst halvt synlige – og beskriv de strømveje du kan se."
-      : "Identificér komponenterne på dette printkort og beskriv strømvejene.") +
-    (extraContext.trim() ? `\n\nOplysninger fra brugeren om kortet/fejlen:\n${extraContext.trim()}` : "");
+      : "Identificér komponenterne på dette printkort og beskriv strømvejene.") + context;
+  const wholeTask = detectRegion(client, settings, image, { x: 0, y: 0, w: W, h: H }, 2000, wholeText, signal).then((r) => {
+    tick();
+    return r;
+  });
+
+  // Felterne: kører et par stykker ad gangen.
+  const tileResults: TileDetection[] = [];
+  const queue = tiles.map((t, i) => ({ t, i }));
+  const worker = async () => {
+    for (let job = queue.shift(); job; job = queue.shift()) {
+      const text =
+        `Dette er et udsnit (felt ${job.i + 1} af ${tiles.length}) af et foto af et printkort, i fuld opløsning. ` +
+        "Find ALLE komponenter i udsnittet – også de allermindste: 0201/0402/0603 SMD-modstande og -kondensatorer, SOT-23-transistorer, små dioder, ferritter og testpunkter. " +
+        "Medtag komponenter der er skåret over ved kanten, hvis mindst halvdelen er synlig. Læs påtryk og silketryk hvor det kan lade sig gøre. " +
+        "board_summary, power_notes og power_paths kan være korte eller tomme for et udsnit." +
+        context;
+      const res = await detectRegion(client, settings, image, job.t, 1600, text, signal);
+      tileResults[job.i] = { tile: job.t, components: res.components };
+      tick();
+    }
+  };
+  const workers = Array.from({ length: Math.min(3, tiles.length) }, worker);
+  const [whole] = await Promise.all([wholeTask, ...workers]);
+
+  const merged = tiles.length ? mergeDetections(whole.components, tileResults.filter(Boolean), W * H) : { components: whole.components, remap: new Map<string, string>() };
+  const keptIds = new Set(merged.components.map((c) => c.id));
+  const out = whole.out;
+  const ai: AiResult = {
+    summary: out.board_summary,
+    powerNotes: out.power_notes,
+    powerPaths: out.power_paths.map((p) => ({
+      name: p.name,
+      voltage: p.voltage,
+      description: p.description,
+      componentIds: p.component_indices
+        .filter((i) => Number.isInteger(i) && i >= 0 && i < whole.components.length)
+        .map((i) => merged.remap.get(whole.components[i].id) ?? whole.components[i].id)
+        .filter((id) => keptIds.has(id)),
+    })),
+    model: whole.model,
+    at: Date.now(),
+  };
+  return { components: merged.components, ai };
+}
+
+/** Analyserer ét område af billedet og returnerer komponenterne i billedets koordinater. */
+async function detectRegion(
+  client: Anthropic,
+  settings: Settings,
+  image: ImageBitmap,
+  region: Rect,
+  maxSide: number,
+  userText: string,
+  signal?: AbortSignal,
+): Promise<{ components: PcbComponent[]; out: z.infer<typeof DetectionSchema>; model: string }> {
+  const scale = Math.min(1, maxSide / Math.max(region.w, region.h));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(region.w * scale));
+  canvas.height = Math.max(1, Math.round(region.h * scale));
+  canvas.getContext("2d")!.drawImage(image, region.x, region.y, region.w, region.h, 0, 0, canvas.width, canvas.height);
+  const data = await toBase64Jpeg(canvas);
 
   const { out, model } = await callClaude(
     client,
@@ -87,21 +184,18 @@ export async function detectWithClaude(
     signal,
   );
 
-  const W = image.width;
-  const H = image.height;
   const clamp = (v: number) => Math.max(0, Math.min(1000, v));
-
   const components: PcbComponent[] = out.components.map((c) => {
-    const x0 = (clamp(Math.min(c.x_min, c.x_max)) / 1000) * W;
-    const x1 = (clamp(Math.max(c.x_min, c.x_max)) / 1000) * W;
-    const y0 = (clamp(Math.min(c.y_min, c.y_max)) / 1000) * H;
-    const y1 = (clamp(Math.max(c.y_min, c.y_max)) / 1000) * H;
+    const x0 = region.x + (clamp(Math.min(c.x_min, c.x_max)) / 1000) * region.w;
+    const x1 = region.x + (clamp(Math.max(c.x_min, c.x_max)) / 1000) * region.w;
+    const y0 = region.y + (clamp(Math.min(c.y_min, c.y_max)) / 1000) * region.h;
+    const y1 = region.y + (clamp(Math.max(c.y_min, c.y_max)) / 1000) * region.h;
     return {
       id: uid(),
       x: x0,
       y: y0,
-      w: Math.max(4, x1 - x0),
-      h: Math.max(4, y1 - y0),
+      w: Math.max(2, x1 - x0),
+      h: Math.max(2, y1 - y0),
       designator: c.designator.trim(),
       type: c.type,
       value: c.value.trim(),
@@ -113,23 +207,7 @@ export async function detectWithClaude(
       source: "ai",
     };
   });
-
-  const ai: AiResult = {
-    summary: out.board_summary,
-    powerNotes: out.power_notes,
-    powerPaths: out.power_paths.map((p) => ({
-      name: p.name,
-      voltage: p.voltage,
-      description: p.description,
-      componentIds: p.component_indices
-        .filter((i) => Number.isInteger(i) && i >= 0 && i < components.length)
-        .map((i) => components[i].id),
-    })),
-    model,
-    at: Date.now(),
-  };
-
-  return { components, ai };
+  return { components, out, model };
 }
 
 type UserContent = Anthropic.Beta.Messages.BetaContentBlockParam[];
@@ -222,18 +300,32 @@ export interface ProbeAnalysisInput {
   isDetail: boolean;
 }
 
-export async function analyzeProbe(input: ProbeAnalysisInput, settings: Settings, signal?: AbortSignal): Promise<ProbeAnalysis> {
-  if (!settings.apiKey) throw new Error("Angiv en Anthropic API-nøgle under Indstillinger først.");
-  const { image, toPixel, toProject, probe } = input;
+/** Komponent der er (delvist) synlig i det billede der sendes til AI, med sit indeks. */
+interface VisibleComponent {
+  idx: number;
+  c: PcbComponent;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
 
+/**
+ * Laver to udgaver af fotoet til AI: det rene foto og et hvor kendte komponenter er tegnet med
+ * cyan rammer og indeks (#n). `mark` kan tegne ekstra markeringer (fx et målepunkt) på det markerede.
+ */
+function prepareBoardImages(
+  image: ImageBitmap,
+  toPixel: (p: Point) => Point,
+  components: PcbComponent[],
+  mark?: (ctx: CanvasRenderingContext2D, s: number, lineWidth: number) => void,
+) {
   const clean = scaledCanvas(image, 2000);
   const s = clean.width / image.width;
   const W = clean.width;
   const H = clean.height;
-
-  // Komponenter der (delvist) er synlige i billedet, med indeks.
-  const visible: { idx: number; c: PcbComponent; x0: number; y0: number; x1: number; y1: number }[] = [];
-  input.components.forEach((c, idx) => {
+  const visible: VisibleComponent[] = [];
+  components.forEach((c, idx) => {
     const a = toPixel({ x: c.x, y: c.y });
     const b = toPixel({ x: c.x + c.w, y: c.y + c.h });
     const x0 = a.x * s, y0 = a.y * s, x1 = b.x * s, y1 = b.y * s;
@@ -241,7 +333,6 @@ export async function analyzeProbe(input: ProbeAnalysisInput, settings: Settings
     visible.push({ idx, c, x0, y0, x1, y1 });
   });
 
-  // Billede 2: målepunkt og komponenter markeret.
   const marked = document.createElement("canvas");
   marked.width = W;
   marked.height = H;
@@ -261,19 +352,7 @@ export async function analyzeProbe(input: ProbeAnalysisInput, settings: Settings
     ctx.fillStyle = "#00e5ff";
     ctx.fillText(label, v.x0 + 2, v.y0);
   }
-  const pp = toPixel(probe);
-  const px = pp.x * s;
-  const py = pp.y * s;
-  const r = Math.max(10, W / 70);
-  ctx.strokeStyle = "#ff2d95";
-  ctx.lineWidth = lw * 2;
-  ctx.beginPath();
-  ctx.arc(px, py, r, 0, Math.PI * 2);
-  ctx.moveTo(px - r * 1.6, py);
-  ctx.lineTo(px + r * 1.6, py);
-  ctx.moveTo(px, py - r * 1.6);
-  ctx.lineTo(px, py + r * 1.6);
-  ctx.stroke();
+  mark?.(ctx, s, lw);
 
   const norm = (v: number, max: number) => Math.round((v / max) * 1000);
   const compLines = visible.map(
@@ -281,6 +360,32 @@ export async function analyzeProbe(input: ProbeAnalysisInput, settings: Settings
       `#${v.idx}: ${v.c.designator || "?"} – ${v.c.type}${v.c.value ? ` (${v.c.value})` : ""}, status: ${v.c.status}` +
       `${v.c.notes ? `, noter: ${v.c.notes}` : ""}, boks x ${norm(v.x0, W)}-${norm(v.x1, W)}, y ${norm(v.y0, H)}-${norm(v.y1, H)}`,
   );
+  return { clean, marked, W, H, s, visible, compLines, norm };
+}
+
+export async function analyzeProbe(input: ProbeAnalysisInput, settings: Settings, signal?: AbortSignal): Promise<ProbeAnalysis> {
+  if (!settings.apiKey) throw new Error("Angiv en Anthropic API-nøgle under Indstillinger først.");
+  const { image, toPixel, toProject, probe } = input;
+
+  const { clean, marked, W, H, s, visible, compLines, norm } = prepareBoardImages(image, toPixel, input.components, (ctx, s, lw) => {
+    const pp = toPixel(probe);
+    const px = pp.x * s;
+    const py = pp.y * s;
+    const r = Math.max(10, ctx.canvas.width / 70);
+    ctx.strokeStyle = "#ff2d95";
+    ctx.lineWidth = lw * 2;
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, Math.PI * 2);
+    ctx.moveTo(px - r * 1.6, py);
+    ctx.lineTo(px + r * 1.6, py);
+    ctx.moveTo(px, py - r * 1.6);
+    ctx.lineTo(px, py + r * 1.6);
+    ctx.stroke();
+  });
+  const pp = toPixel(probe);
+  const px = pp.x * s;
+  const py = pp.y * s;
+
   const userText = [
     input.isDetail ? "Fotoet er et nærbillede af et udsnit af printet." : "Fotoet viser hele printet.",
     `Målepunkt ${probe.label} ligger ved x=${norm(px, W)}, y=${norm(py, H)} (normaliseret).`,
@@ -432,4 +537,175 @@ export async function findBoardWithClaude(image: ImageBitmap, settings: Settings
     signal,
   );
   return out.found ? boxFrom(out) : null;
+}
+
+// ---------- Fejlsøgningsguide: ét målepunkt ad gangen ----------
+
+const PointSchema = z.object({
+  x: z.number().describe("0-1000 relativt til billedets bredde"),
+  y: z.number().describe("0-1000 relativt til billedets højde"),
+  where: z.string().describe("Præcist hvor proben sættes, fx 'ben 3 (udgang) på U1' eller 'minus-benet på C5 (GND)'. Dansk."),
+});
+
+const GuideSchema = z.object({
+  assessment: z.string().describe("Kort status: hvad ved vi nu, og hvad mistænker vi. Dansk."),
+  status: z.enum(["step", "done"]).describe("'step' = næste måling, 'done' = fejlen er fundet eller kan ikke indkredses mere med multimeter"),
+  step: z.object({
+    title: z.string().describe("Kort titel, fx 'Mål modstand fra 5V til GND'. Dansk."),
+    why: z.string().describe("Hvorfor denne måling, og hvad den fortæller. Dansk."),
+    safety: z.string().describe("Sikkerhedsadvarsel hvis relevant (netspænding, afladning af kondensatorer …), ellers tom streng. Dansk."),
+    power: z.enum(["on", "off"]).describe("Skal kortet have strøm under målingen?"),
+    mode: z.enum(["dc_voltage", "ac_voltage", "resistance", "continuity", "diode", "current"]),
+    range: z.string().describe("Måleområde, fx '20 V' eller 'auto'."),
+    red: PointSchema.describe("Hvor den RØDE probe sættes"),
+    black: PointSchema.describe("Hvor den SORTE probe sættes"),
+    expected: z.string().describe("Hvad et rask kort viser, fx 'ca. 5 V', 'over 100 Ω', 'bip'. Dansk."),
+    net_name: z.string().describe("Net målingen hører til, fx 5V, VIN, GND. Tom hvis ukendt."),
+    outcomes: z
+      .array(z.object({ result: z.string(), meaning: z.string() }))
+      .describe("2-4 mulige resultater og hvad de betyder for fejlsøgningen. Dansk."),
+  }),
+  conclusion: z.object({
+    summary: z.string().describe("Hvad fejlen er (eller mest sandsynligt er) og hvorfor. Tom hvis status='step'. Dansk."),
+    suspects: z.array(
+      z.object({
+        component_index: z.number().describe("Indeks (#n) i komponentlisten, -1 hvis ikke på listen"),
+        designator: z.string(),
+        reason: z.string(),
+      }),
+    ),
+    fix: z.string().describe("Hvad brugeren bør gøre: udskifte, eftermåle uden for kredsløbet, osv. Dansk."),
+  }),
+});
+
+const GUIDE_SYSTEM_PROMPT = `Du er en erfaren elektronikreparatør der guider en bruger med et multimeter gennem fejlsøgning af et printkort, ét målepunkt ad gangen.
+
+Du får fotoet af printet (rent og med kendte komponenter markeret med cyan rammer og indeks #n), brugerens beskrivelse, tidligere målinger og alle hidtidige skridt med resultater. Giv det ENE næste skridt der giver mest information – eller en konklusion når fejlen er indkredset.
+
+For hvert skridt:
+- Angiv præcis hvor den røde og den sorte probe skal sættes, både som koordinater (normaliseret 0-1000 i billedet) og i tekst (fx "ben 1 på U2", "minus på C3"). Vælg punkter der er synlige og til at ramme: ben, pads, testpunkter, stikben, kondensatorernes ben.
+- Brug et nemt tilgængeligt GND-punkt til den sorte probe ved spændingsmålinger (stikkets GND-ben, minus på en stor elektrolytkondensator, skruehul med kobber).
+- Vælg multimeterindstilling og om kortet skal have strøm. Modstand, gennemgang og diodetest altid UDEN strøm.
+- Forklar kort hvorfor, hvad et rask kort viser, og hvad de mulige resultater betyder.
+
+Metode:
+- Dødt kort: start ved indgangen og følg strømvejen: spænding på indgangsstikket → efter sikring → efter beskyttelsesdiode → ind/ud af hver regulator → ved lasten. Hvor spændingen forsvinder mellem to punkter, sidder fejlen imellem. Tjek også om forsyningen trækkes ned (kortslutning) frem for at mangle.
+- Kortslutning: kortet må IKKE få strøm før kortslutningen er fundet. Mål modstand fra hver forsyningsskinne til GND (store kondensatorer giver en stigende værdi – vent). Meget lav modstand (under ca. 1-5 Ω afhængigt af skinnen) = kortslutning. Del skinnen op ved at løfte en spole, ferrit, 0 Ω-modstand eller sikring og mål hver halvdel. Typiske syndere: keramiske kondensatorer (MLCC), tantalkondensatorer, TVS-/beskyttelsesdioder, MOSFETs og regulatorer. Til at finde den præcise komponent: spændingsfaldsmetoden (mål mV langs banen mens en strømbegrænset laboratorieforsyning sender strøm ind – faldet bliver mindre jo tættere man kommer på kortslutningen) eller strøminjektion ved lav spænding (fx 1 V, strømbegrænset) og find den komponent der bliver varm (finger, termokamera eller isopropanol der fordamper).
+- Varm komponent: mål forsyningen ved komponenten, modstand til GND uden strøm, og tjek om lasten efter den er kortsluttet.
+- Find strømvejen: brug gennemgangstest mellem stikbenet og komponenternes ben for at bekræfte forbindelser, og spændingsmålinger med strøm til for at følge nettet.
+- Komponenttest i kredsløbet: diodetest på dioder/transistorer, modstand på modstande (husk parallelle veje – mål evt. uden for kredsløbet ved at løfte det ene ben).
+- Tilpas dig resultaterne. Gentag ikke målinger der allerede er gjort, medmindre et resultat er uklart. Hvis brugeren ikke kunne måle et sted, så foreslå et alternativt punkt.
+
+Sikkerhed: Hvis kortet ser ud til at have netspænding (230 V-indgang, store højspændingskondensatorer, transformer, optokoblere, "HOT"-zone), så advar tydeligt, anbefal at måle uden strøm eller bruge skilletransformer, og send aldrig brugeren ind på primærsiden med strøm på. Mind om at aflade store kondensatorer før modstandsmålinger.
+
+Når status er 'done', udfyld conclusion; ellers lad conclusion-felterne være tomme. Udfyld altid step (ved 'done' kan det være et forslag til en bekræftende måling). Skriv på dansk, kort og konkret – brugeren står med proberne i hånden.`;
+
+export interface GuideInput {
+  image: ImageBitmap;
+  toPixel: (p: Point) => Point;
+  toProject: (p: Point) => Point;
+  guide: Guide;
+  components: PcbComponent[];
+  nets: { name: string; voltage: string }[];
+  probes: { label: string; net: string; expected: string; measured: string; notes: string }[];
+  isDetail: boolean;
+  /** Ekstra besked fra brugeren til dette skridt (fx "fortsæt" efter en konklusion). */
+  note?: string;
+}
+
+export interface GuideResult {
+  assessment: string;
+  step: GuideStep | null;
+  conclusion: Guide["conclusion"] | null;
+  model: string;
+}
+
+export async function nextGuideStep(input: GuideInput, settings: Settings, signal?: AbortSignal): Promise<GuideResult> {
+  if (!settings.apiKey) throw new Error("Angiv en Anthropic API-nøgle under Indstillinger først.");
+  const { image, toPixel, toProject, guide } = input;
+  const { clean, marked, W, H, s, visible, compLines, norm } = prepareBoardImages(image, toPixel, input.components);
+  const pos = (p: Point) => {
+    const q = toPixel(p);
+    return `x=${norm(q.x * s, W)}, y=${norm(q.y * s, H)}`;
+  };
+
+  const history = guide.steps.map((st, i) => {
+    const m = METER_MODES[st.mode];
+    return [
+      `Skridt ${i + 1}: ${st.title}`,
+      `  Multimeter: ${m.label} (${st.range || "auto"}), strøm ${st.power === "on" ? "TIL" : "FRA"}`,
+      `  Rød: ${st.red.where} (${pos(st.red)}) · Sort: ${st.black.where} (${pos(st.black)})`,
+      `  Forventet: ${st.expected}`,
+      `  Resultat: ${st.skipped ? `kunne ikke måles (${st.result || "ingen grund angivet"})` : st.result || "ikke målt"}`,
+    ].join("\n");
+  });
+
+  const userText = [
+    input.isDetail ? "Fotoet er et nærbillede af et udsnit af printet." : "Fotoet viser hele printet.",
+    `Mål: ${GUIDE_GOALS[guide.goal]}.`,
+    guide.description.trim() ? `Brugerens beskrivelse:\n${guide.description.trim()}` : "",
+    input.nets.length ? `Kendte net: ${input.nets.map((n) => `${n.name}${n.voltage ? ` (${n.voltage})` : ""}`).join(", ")}` : "",
+    input.probes.length
+      ? `Målinger brugeren har registreret:\n${input.probes.map((o) => `- ${o.label} (${o.net || "ukendt net"}): forventet ${o.expected || "?"}, målt ${o.measured || "?"}${o.notes ? ` – ${o.notes}` : ""}`).join("\n")}`
+      : "",
+    compLines.length ? `Kendte komponenter i billedet:\n${compLines.join("\n")}` : "Ingen komponenter er markeret endnu – beskriv dem i tekst.",
+    history.length ? `Hidtidige skridt:\n${history.join("\n")}` : "Dette er første skridt.",
+    input.note ? `Brugeren skriver: ${input.note}` : "",
+    "Giv det næste skridt (eller konklusionen).",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const client = new Anthropic({ apiKey: settings.apiKey, dangerouslyAllowBrowser: true });
+  const { out, model } = await callClaude(
+    client,
+    settings,
+    GUIDE_SYSTEM_PROMPT,
+    GuideSchema,
+    [
+      { type: "text", text: "Billede 1 (rent foto):" },
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: await toBase64Jpeg(clean) } },
+      { type: "text", text: "Billede 2 (kendte komponenter markeret):" },
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: await toBase64Jpeg(marked) } },
+      { type: "text", text: userText },
+    ],
+    signal,
+  );
+
+  const clamp = (v: number) => Math.max(0, Math.min(1000, v));
+  const fromNorm = (pt: { x: number; y: number }) => toProject({ x: ((clamp(pt.x) / 1000) * W) / s, y: ((clamp(pt.y) / 1000) * H) / s });
+  const byIndex = new Map(visible.map((v) => [v.idx, v.c]));
+  const st = out.step;
+  const step: GuideStep = {
+    id: uid(),
+    title: st.title,
+    why: st.why,
+    safety: st.safety.trim(),
+    power: st.power,
+    mode: st.mode as MeterMode,
+    range: st.range,
+    red: { ...fromNorm(st.red), where: st.red.where },
+    black: { ...fromNorm(st.black), where: st.black.where },
+    expected: st.expected,
+    netName: st.net_name.trim(),
+    outcomes: st.outcomes,
+    at: Date.now(),
+  };
+  const done = out.status === "done";
+  return {
+    assessment: out.assessment,
+    step: done ? null : step,
+    conclusion: done
+      ? {
+          summary: out.conclusion.summary,
+          fix: out.conclusion.fix,
+          suspects: out.conclusion.suspects.map((c) => ({
+            componentId: byIndex.get(c.component_index)?.id ?? "",
+            designator: c.designator.trim() || byIndex.get(c.component_index)?.designator || "",
+            reason: c.reason,
+          })),
+        }
+      : null,
+    model,
+  };
 }

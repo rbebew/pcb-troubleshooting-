@@ -1,5 +1,6 @@
 import "./style.css";
-import { analyzeProbe, describeApiError, detectWithClaude, findBoardWithClaude, locateDetailWithClaude } from "./ai";
+import { analyzeProbe, describeApiError, detectWithClaude, findBoardWithClaude, locateDetailWithClaude, nextGuideStep } from "./ai";
+import { currentGuideStep, frameGuideStep } from "./guidePanel";
 import { $, download, formatDate, h, toast } from "./dom";
 import { Editor, type Tool } from "./editor";
 import { nextDesignator } from "./geometry";
@@ -9,7 +10,7 @@ import { grayFromRgba, locateDetail, type Gray, type Hint } from "./register";
 import { Panel } from "./panel";
 import * as store from "./store";
 import type { SyncEvent } from "./sync";
-import { COMPONENT_TYPES, NET_PRESETS, STATUS_COLORS, uid, type DetailPhoto, type PcbComponent, type Project, type Rect } from "./types";
+import { COMPONENT_TYPES, NET_PRESETS, STATUS_COLORS, uid, type DetailPhoto, type GuideGoal, type PcbComponent, type Project, type Rect } from "./types";
 
 let settings = store.loadSettings();
 let editor: Editor | null = null;
@@ -141,7 +142,21 @@ async function openProject(id: string): Promise<void> {
 
   const ed = new Editor($("#board") as HTMLCanvasElement, p, image);
   editor = ed;
-  panel = new Panel($("#panel"), ed, { runAi: openAiDialog, runLocal: runLocalDetect, analyzeProbe: runProbeAnalysis });
+  panel = new Panel($("#panel"), ed, {
+    runAi: openAiDialog,
+    runLocal: runLocalDetect,
+    analyzeProbe: runProbeAnalysis,
+    startGuide,
+    answerGuide,
+    continueGuide: () => {
+      if (editor?.project.guide) {
+        editor.project.guide.conclusion = undefined;
+        runGuide("Jeg vil gerne fortsætte med flere målinger for at bekræfte eller finde mere.");
+      }
+    },
+    retryGuide: () => runGuide(),
+    endGuide,
+  });
   ($("#project-name") as HTMLInputElement).value = p.name;
 
   let lastSel = "";
@@ -236,6 +251,8 @@ function isNarrow(): boolean {
 function setPanelOpen(open: boolean): void {
   $("#editor").classList.toggle("panel-open", open);
   $("#panel-toggle").classList.toggle("active", open);
+  // På mobil dækker panelet den nederste del af billedet – centrér i det synlige stykke.
+  if (editor) editor.viewInsetBottom = open && isNarrow() ? $("#panel").offsetHeight : 0;
 }
 
 function askComponentType(rect: { x: number; y: number; w: number; h: number }): void {
@@ -713,6 +730,7 @@ function openAiDialog(): void {
   $("#ai-replace-label").textContent = ed.photo
     ? "Erstat tidligere AI-/auto-fundne komponenter i dette udsnit (manuelle beholdes)"
     : "Erstat tidligere AI-/auto-fundne komponenter (manuelle beholdes)";
+  ($("#ai-detail") as HTMLSelectElement).value = String(settings.detail ?? 2);
   const dlg = $("#ai-dialog") as HTMLDialogElement;
   dlg.returnValue = "";
   dlg.showModal();
@@ -736,10 +754,17 @@ async function runAi(): Promise<void> {
   const context = ($("#ai-context") as HTMLTextAreaElement).value;
   const replace = ($("#ai-replace") as HTMLInputElement).checked;
   const isDetail = !!ed.photo;
+  const detail = Number(($("#ai-detail") as HTMLSelectElement).value) as 1 | 2 | 3;
+  if (detail !== settings.detail) {
+    settings = { ...settings, detail };
+    store.saveSettings(settings);
+  }
   const ctrl = new AbortController();
   const done = showBusy("Claude analyserer billedet … det kan tage et minut.", () => ctrl.abort());
   try {
-    const { components, ai } = await detectWithClaude(ed.image, settings, context, ctrl.signal, isDetail);
+    const { components, ai } = await detectWithClaude(ed.image, settings, context, ctrl.signal, isDetail, detail, (p) => {
+      if (p.total > 1) $("#busy-text").textContent = `Claude analyserer billedet i ${p.total} dele … ${p.done} af ${p.total} færdige`;
+    });
     if (editor !== ed) return;
     // Komponenterne er fundet i det viste billedes pixels – omregn til projektkoordinater.
     for (const c of components) Object.assign(c, ed.rectOut(c));
@@ -841,6 +866,108 @@ async function runProbeAnalysis(probeId: string): Promise<void> {
   }
 }
 
+// ---------- Fejlsøgningsguide ----------
+
+function startGuide(goal: GuideGoal, description: string): void {
+  const ed = editor;
+  if (!ed) return;
+  if (!settings.apiKey) {
+    toast("Angiv din Anthropic API-nøgle først.");
+    openSettings();
+    return;
+  }
+  ed.project.guide = { goal, description, steps: [], assessment: "", model: "" };
+  ed.changed();
+  runGuide();
+}
+
+function endGuide(): void {
+  const ed = editor;
+  if (!ed?.project.guide) return;
+  if (!confirm("Afslut guiden? Målingerne bevares under Målinger.")) return;
+  ed.project.guide = undefined;
+  ed.changed();
+}
+
+/** Brugerens svar på det aktuelle skridt: gem det, registrér målingen og hent næste skridt. */
+function answerGuide(result: string, skipped: boolean): void {
+  const ed = editor;
+  const g = ed?.project.guide;
+  const step = currentGuideStep(g);
+  if (!ed || !g || !step) return;
+  ed.checkpoint();
+  step.result = skipped ? result || "kunne ikke måles" : result;
+  step.skipped = skipped;
+  const net = step.netName ? ed.project.nets.find((n) => n.name.toLowerCase() === step.netName.toLowerCase()) : undefined;
+
+  if (!skipped && (step.mode === "dc_voltage" || step.mode === "ac_voltage" || step.mode === "resistance")) {
+    // Spændings- og modstandsmålinger gemmes også som målepunkter, så de vises grønne/røde på billedet.
+    ed.project.probes.push({
+      id: uid(),
+      x: step.red.x,
+      y: step.red.y,
+      label: `G${g.steps.indexOf(step) + 1}`,
+      netId: net?.id ?? "",
+      kind: step.mode === "resistance" ? "resistance" : "voltage",
+      expected: step.expected,
+      measured: result,
+      notes: step.title,
+    });
+  }
+  if (!skipped && step.mode === "continuity" && /^(bip|ja|yes|beep)/i.test(result) && net) {
+    // Bekræftet forbindelse: bliver en del af strømvejen.
+    ed.project.traces.push({ id: uid(), netId: net.id, points: [{ x: step.black.x, y: step.black.y }, { x: step.red.x, y: step.red.y }] });
+  }
+  ed.changed();
+  runGuide();
+}
+
+async function runGuide(note?: string): Promise<void> {
+  const ed = editor;
+  const g = ed?.project.guide;
+  if (!ed || !g) return;
+  const ctrl = new AbortController();
+  const done = showBusy("Claude planlægger næste måling …", () => ctrl.abort());
+  try {
+    const res = await nextGuideStep(
+      {
+        image: ed.image,
+        toPixel: (p) => ed.mapIn(p),
+        toProject: (p) => ed.mapOut(p),
+        guide: g,
+        components: ed.project.components,
+        nets: ed.project.nets.map((n) => ({ name: n.name, voltage: n.voltage })),
+        probes: ed.project.probes.map((x) => ({ label: x.label, net: ed.net(x.netId)?.name ?? "", expected: x.expected, measured: x.measured, notes: x.notes })),
+        isDetail: !!ed.photo,
+        note,
+      },
+      settings,
+      ctrl.signal,
+    );
+    if (editor !== ed || ed.project.guide !== g) return;
+    g.assessment = res.assessment;
+    g.model = res.model;
+    if (res.step) g.steps.push(res.step);
+    if (res.conclusion) g.conclusion = res.conclusion;
+    ed.selection = null;
+    ed.changed();
+    if (panel) {
+      panel.tab = "guide";
+      panel.render();
+    }
+    if (isNarrow()) setPanelOpen(true);
+    if (res.step) frameGuideStep(ed, res.step);
+  } catch (err) {
+    if (ctrl.signal.aborted) toast("Annulleret.");
+    else {
+      console.error(err);
+      toast(describeApiError(err), "error", 8000);
+    }
+  } finally {
+    done();
+  }
+}
+
 function runLocalDetect(): void {
   const ed = editor;
   if (!ed) return;
@@ -903,6 +1030,7 @@ $("#settings-dialog").addEventListener("close", () => {
   if (dlg.returnValue !== "save") return;
   const signalChanged = settings.signalServer !== ($("#signal-server") as HTMLInputElement).value.trim();
   settings = {
+    ...settings,
     apiKey: ($("#api-key") as HTMLInputElement).value.trim(),
     model: ($("#model") as HTMLSelectElement).value,
     effort: ($("#effort") as HTMLSelectElement).value as store.Settings["effort"],

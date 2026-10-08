@@ -196,13 +196,14 @@ export function detectBoard(img: PixelImage): Rect | null {
 
   // Dominerende farvetone i den midterste fjerdedel.
   const bins = new Float32Array(36);
-  let satSum = 0, valSum = 0, cnt = 0;
+  const valBins = new Float32Array(32);
+  let satSum = 0, cnt = 0;
   for (let y = Math.floor(H * 0.3); y < H * 0.7; y++) {
     for (let x = Math.floor(W * 0.3); x < W * 0.7; x++) {
       const i = y * W + x;
       bins[Math.floor(hue[i] / 10) % 36] += sat[i];
       satSum += sat[i];
-      valSum += val[i];
+      if (sat[i] < 0.25) valBins[Math.min(31, Math.floor(val[i] * 32))]++;
       cnt++;
     }
   }
@@ -210,7 +211,10 @@ export function detectBoard(img: PixelImage): Rect | null {
   for (let i = 1; i < 36; i++) if (bins[i] > bins[best]) best = i;
   const boardHue = best * 10 + 5;
   const colorful = satSum / cnt > 0.18;
-  const meanVal = valSum / cnt;
+  // Sorte/hvide plader: den mest udbredte lysstyrke (et gennemsnit trækkes op af blanke metaldele).
+  let vBest = 0;
+  for (let i = 1; i < 32; i++) if (valBins[i] > valBins[vBest]) vBest = i;
+  const boardVal = (vBest + 0.5) / 32;
 
   let mask: Uint8Array = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
@@ -218,7 +222,7 @@ export function detectBoard(img: PixelImage): Rect | null {
       const dh = Math.min(Math.abs(hue[i] - boardHue), 360 - Math.abs(hue[i] - boardHue));
       mask[i] = dh < 25 && sat[i] > 0.15 ? 1 : 0;
     } else {
-      mask[i] = Math.abs(val[i] - meanVal) < 0.18 ? 1 : 0;
+      mask[i] = Math.abs(val[i] - boardVal) < 0.15 ? 1 : 0;
     }
   }
   const r = Math.max(2, Math.round(Math.min(W, H) * 0.02));

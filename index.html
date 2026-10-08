@@ -189,6 +189,18 @@
           <span>Hvad ved du om kortet/fejlen? (valgfrit)</span>
           <textarea id="ai-context" rows="3" placeholder="fx 'Strømforsyning til kaffemaskine, 230V ind, død – ingen LED lyser'"></textarea>
         </label>
+        <label class="field">
+          <span>Detaljegrad</span>
+          <select id="ai-detail">
+            <option value="1">Hurtig – store og mellemstore komponenter</option>
+            <option value="2">Grundig – også små SMD-komponenter (5 analyser)</option>
+            <option value="3">Meget grundig – også de mindste (0402/0201) (10 analyser)</option>
+          </select>
+        </label>
+        <p class="muted small" id="ai-detail-hint">
+          Grundig deler billedet op i felter, der hver analyseres i fuld opløsning. Det tager længere tid og koster
+          tilsvarende mere. Tag billedet skarpt og tæt på – eller brug nærbilleder – for de bedste resultater.
+        </p>
         <label class="check">
           <input type="checkbox" id="ai-replace" checked />
           <span id="ai-replace-label">Erstat tidligere AI-/auto-fundne komponenter (manuelle beholdes)</span>

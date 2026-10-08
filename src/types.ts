@@ -110,6 +110,8 @@ export interface Probe {
   expected: string;
   measured: string;
   notes: string;
+  /** Hvad der måles. Standard er spænding. */
+  kind?: "voltage" | "resistance";
   /** Seneste AI-fejlanalyse ud fra dette målepunkt. */
   ai?: ProbeAnalysis;
 }
@@ -133,6 +135,91 @@ export interface ProbeAnalysis {
   nextSteps: string[];
   model: string;
   at: number;
+}
+
+export type MeterMode = "dc_voltage" | "ac_voltage" | "resistance" | "continuity" | "diode" | "current";
+
+export const METER_MODES: Record<MeterMode, { label: string; symbol: string; tip: string }> = {
+  dc_voltage: {
+    label: "DC-spænding",
+    symbol: "V⎓",
+    tip: "Drej multimeteret til V⎓. Sort ledning i COM, rød i VΩ. Strømmen skal være TIL. Hold proberne stille på metallet (pad, ben eller testpunkt).",
+  },
+  ac_voltage: {
+    label: "AC-spænding",
+    symbol: "V~",
+    tip: "Drej til V~. Sort i COM, rød i VΩ. Pas på – AC på et print er ofte netspænding (230 V).",
+  },
+  resistance: {
+    label: "Modstand",
+    symbol: "Ω",
+    tip: "Drej til Ω. Strømmen skal være FRA og store kondensatorer afladt. Kondensatorer kan få værdien til at stige langsomt – vent til den falder til ro. Måler man i kredsløbet, påvirker de andre komponenter resultatet.",
+  },
+  continuity: {
+    label: "Gennemgang",
+    symbol: "🔊",
+    tip: "Drej til lydsymbolet (ofte samme position som diodetest). Strømmen skal være FRA. Bip = forbindelse (typisk under 30-50 Ω).",
+  },
+  diode: {
+    label: "Diodetest",
+    symbol: "⊳|",
+    tip: "Drej til diodesymbolet. Strømmen skal være FRA. Rød på anode, sort på katode (stregen). 0,2-0,8 V er normalt i lederetningen, OL i spærreretningen. 0 V begge veje = kortsluttet.",
+  },
+  current: {
+    label: "Strøm",
+    symbol: "A",
+    tip: "Flyt den røde ledning til A- eller mA-stikket! Multimeteret skal sidde I SERIE i kredsløbet (afbryd forbindelsen og mål hen over afbrydelsen). Start på højeste område. Flyt ledningen tilbage bagefter.",
+  },
+};
+
+export type GuideGoal = "dead" | "short" | "hot" | "path" | "other";
+
+export const GUIDE_GOALS: Record<GuideGoal, string> = {
+  dead: "Kortet er dødt / mangler spænding",
+  short: "Kortslutning (sikring springer, forsyning går i beskyttelse)",
+  hot: "En komponent bliver varm",
+  path: "Find strømvejen",
+  other: "Anden fejl",
+};
+
+export interface GuidePoint {
+  x: number;
+  y: number;
+  /** Hvor proben skal sættes, fx "ben 3 (udgang) på U1". */
+  where: string;
+}
+
+export interface GuideStep {
+  id: string;
+  title: string;
+  why: string;
+  safety: string;
+  power: "on" | "off";
+  mode: MeterMode;
+  range: string;
+  red: GuidePoint;
+  black: GuidePoint;
+  expected: string;
+  netName: string;
+  /** Hvad forskellige resultater betyder. */
+  outcomes: { result: string; meaning: string }[];
+  /** Brugerens svar. */
+  result?: string;
+  skipped?: boolean;
+  at: number;
+}
+
+export interface Guide {
+  goal: GuideGoal;
+  description: string;
+  steps: GuideStep[];
+  assessment: string;
+  conclusion?: {
+    summary: string;
+    suspects: { componentId: string; designator: string; reason: string }[];
+    fix: string;
+  };
+  model: string;
 }
 
 export interface AiPowerPath {
@@ -178,6 +265,8 @@ export interface Project {
   /** Nærbilleder. Alle markeringer gemmes i oversigtsbilledets koordinater og vises på alle billeder. */
   photos?: DetailPhoto[];
   ai?: AiResult;
+  /** Igangværende AI-fejlsøgningsguide. */
+  guide?: Guide;
 }
 
 export function uid(): string {

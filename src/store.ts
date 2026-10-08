@@ -152,6 +152,8 @@ export interface Settings {
   effort: "low" | "medium" | "high";
   /** Valgfri egen PeerJS-signalserver, fx "https://min-server.dk:9000/peerjs". Tom = PeerJS' gratis server. */
   signalServer: string;
+  /** Detaljegrad for AI-komponentsøgning: 1 = hurtig, 2 = små komponenter, 3 = meget små. */
+  detail: 1 | 2 | 3;
 }
 
 const SETTINGS_KEY = "pcb-settings";
@@ -163,7 +165,7 @@ export const MODELS = [
 ];
 
 export function loadSettings(): Settings {
-  const defaults: Settings = { apiKey: "", model: "claude-opus-5-5", effort: "medium", signalServer: "" };
+  const defaults: Settings = { apiKey: "", model: "claude-opus-5-5", effort: "medium", signalServer: "", detail: 2 };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     return raw ? { ...defaults, ...JSON.parse(raw) } : defaults;
