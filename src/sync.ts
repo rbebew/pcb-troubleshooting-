@@ -429,7 +429,7 @@ class SyncManager {
         if (local && local.updated >= p.updated) return;
         let image: Blob | undefined;
         if (msg.image) image = new Blob([msg.image], { type: msg.imageType || "image/jpeg" });
-        else if (!local || !(await store.getImage(p.id))) {
+        else if (!local || !(await store.getImage(p.id)) || (local.imageVersion ?? 0) !== (p.imageVersion ?? 0)) {
           conn.send({ type: "need", id: p.id } satisfies Msg);
           return;
         }

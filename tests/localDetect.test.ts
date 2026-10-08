@@ -42,3 +42,41 @@ describe("detectComponentsLocal", () => {
     expect(detectComponentsLocal({ width: W, height: W, data })).toEqual([]);
   });
 });
+
+import { detectBoard } from "../src/localDetect";
+
+describe("detectBoard", () => {
+  function photo(boardColor: [number, number, number]): PixelImage {
+    const W = 300, H = 200;
+    const data = new Uint8ClampedArray(W * H * 4);
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 4;
+        const onBoard = x >= 40 && x < 260 && y >= 30 && y < 170;
+        // Bordet: lys træfarve med gradient; pladen: farve med ujævn belysning og komponenter.
+        const shade = 0.75 + 0.25 * (x / W);
+        let c: number[] = onBoard ? boardColor.map((v) => v * shade) : [180 + y * 0.2, 150, 110];
+        if (onBoard && (x - 100) ** 2 + (y - 90) ** 2 < 300) c = [20, 20, 20]; // en chip
+        data[i] = c[0];
+        data[i + 1] = c[1];
+        data[i + 2] = c[2];
+        data[i + 3] = 255;
+      }
+    return { width: W, height: H, data };
+  }
+
+  it("finder en grøn plade på et træbord", () => {
+    const r = detectBoard(photo([20, 120, 55]))!;
+    expect(r).not.toBeNull();
+    expect(Math.abs(r.x - 40)).toBeLessThan(8);
+    expect(Math.abs(r.y - 30)).toBeLessThan(8);
+    expect(Math.abs(r.x + r.w - 260)).toBeLessThan(8);
+    expect(Math.abs(r.y + r.h - 170)).toBeLessThan(8);
+  });
+
+  it("finder en blå plade", () => {
+    const r = detectBoard(photo([20, 60, 160]))!;
+    expect(Math.abs(r.x - 40)).toBeLessThan(8);
+    expect(Math.abs(r.x + r.w - 260)).toBeLessThan(8);
+  });
+});

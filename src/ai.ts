@@ -346,3 +346,90 @@ export function describeApiError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
 }
+
+// ---------- Placering af nærbilleder og beskæring ----------
+
+const BoxSchema = {
+  x_min: z.number().describe("Venstre kant, 0-1000 relativt til billedets bredde"),
+  y_min: z.number().describe("Øverste kant, 0-1000 relativt til billedets højde"),
+  x_max: z.number().describe("Højre kant, 0-1000 relativt til billedets bredde"),
+  y_max: z.number().describe("Nederste kant, 0-1000 relativt til billedets højde"),
+};
+
+const LocateSchema = z.object({
+  found: z.boolean().describe("false hvis nærbilledet ikke ser ud til at være fra samme print"),
+  ...BoxSchema,
+  rotation_cw: z.enum(["0", "90", "180", "270"]).describe("Grader nærbilledet skal drejes med uret for at have samme orientering som oversigten"),
+  confidence: z.enum(["high", "medium", "low"]),
+});
+
+export interface LocateResult {
+  found: boolean;
+  /** Brøkdele (0-1) af oversigtens bredde/højde. */
+  box: { x: number; y: number; w: number; h: number };
+  /** Kvart-omgange med uret. */
+  rot: 0 | 1 | 2 | 3;
+  confidence: "high" | "medium" | "low";
+}
+
+function boxFrom(o: { x_min: number; y_min: number; x_max: number; y_max: number }) {
+  const c = (v: number) => Math.max(0, Math.min(1000, v)) / 1000;
+  const x0 = c(Math.min(o.x_min, o.x_max));
+  const y0 = c(Math.min(o.y_min, o.y_max));
+  return { x: x0, y: y0, w: c(Math.max(o.x_min, o.x_max)) - x0, h: c(Math.max(o.y_min, o.y_max)) - y0 };
+}
+
+/** Spørger Claude hvor på oversigten et nærbillede sidder (bruges som udgangspunkt for finjustering). */
+export async function locateDetailWithClaude(overview: ImageBitmap, detail: ImageBitmap, settings: Settings, signal?: AbortSignal): Promise<LocateResult> {
+  if (!settings.apiKey) throw new Error("Angiv en Anthropic API-nøgle under Indstillinger først.");
+  const client = new Anthropic({ apiKey: settings.apiKey, dangerouslyAllowBrowser: true });
+  const { out } = await callClaude(
+    client,
+    settings,
+    "Du hjælper med at samle fotos af et printkort: et oversigtsbillede af hele printet og nærbilleder af udsnit af det.",
+    LocateSchema,
+    [
+      { type: "text", text: "Billede 1 – oversigt over hele printet:" },
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: await toBase64Jpeg(scaledCanvas(overview, 1568)) } },
+      { type: "text", text: "Billede 2 – nærbillede af et udsnit af samme print:" },
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: await toBase64Jpeg(scaledCanvas(detail, 1024)) } },
+      {
+        type: "text",
+        text:
+          "Find det område på billede 1 som billede 2 viser. Brug komponenternes form, placering og påtryk som pejlemærker. " +
+          "Angiv området som en boks i normaliserede koordinater (0-1000) på billede 1, og hvor mange grader billede 2 skal drejes med uret " +
+          "for at have samme orientering som billede 1. Sæt found=false hvis billede 2 ikke ser ud til at være fra samme print.",
+      },
+    ],
+    signal,
+  );
+  return { found: out.found, box: boxFrom(out), rot: (Number(out.rotation_cw) / 90) as 0 | 1 | 2 | 3, confidence: out.confidence };
+}
+
+const BoardSchema = z.object({
+  found: z.boolean(),
+  ...BoxSchema,
+});
+
+/** Spørger Claude hvor selve printpladen er i fotoet (til beskæring). Returnerer brøkdele af billedet. */
+export async function findBoardWithClaude(image: ImageBitmap, settings: Settings, signal?: AbortSignal): Promise<LocateResult["box"] | null> {
+  if (!settings.apiKey) throw new Error("Angiv en Anthropic API-nøgle under Indstillinger først.");
+  const client = new Anthropic({ apiKey: settings.apiKey, dangerouslyAllowBrowser: true });
+  const { out } = await callClaude(
+    client,
+    settings,
+    "Du hjælper med at beskære fotos af printkort.",
+    BoardSchema,
+    [
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: await toBase64Jpeg(scaledCanvas(image, 1568)) } },
+      {
+        type: "text",
+        text:
+          "Find selve printpladen på fotoet. Angiv en stram boks i normaliserede koordinater (0-1000) der omslutter hele pladen inklusive " +
+          "komponenter og stik der stikker ud over kanten, men uden bord og baggrund. Sæt found=false hvis der ikke er et print på billedet.",
+      },
+    ],
+    signal,
+  );
+  return out.found ? boxFrom(out) : null;
+}

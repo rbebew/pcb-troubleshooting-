@@ -68,6 +68,7 @@
             <button class="btn icon-only sync-badge" id="menu-btn" aria-haspopup="true" aria-expanded="false" aria-label="Flere handlinger">⋯<span class="sync-dot corner"></span></button>
             <div class="menu" id="menu" hidden>
               <button data-action="local">🔍 Hurtig lokal søgning (offline)</button>
+              <button data-action="crop">✂ Beskær billedet</button>
               <button data-action="labels">🏷 Vis/skjul etiketter</button>
               <button data-action="toggle-components">▢ Vis/skjul komponentbokse</button>
               <button data-action="clear-ai">🧹 Fjern AI-/auto-fundne komponenter</button>
@@ -108,9 +109,15 @@
               <span>◐</span>
               <input type="range" id="place-opacity" min="15" max="100" value="60" aria-label="Gennemsigtighed" />
             </label>
+            <button class="btn small" id="place-auto" title="Find placeringen automatisk (tryk igen for at spørge AI)">✨ Find automatisk</button>
             <button class="btn small" id="place-rotate" title="Roter 90°">↻ Roter</button>
             <button class="btn small" id="place-cancel">Annullér</button>
             <button class="btn small primary" id="place-save">Gem placering</button>
+          </div>
+          <div class="place-bar" id="crop-bar" hidden>
+            <button class="btn small" id="crop-ai" title="Lad AI finde printets kanter">✨ Find printet</button>
+            <button class="btn small" id="crop-cancel">Annullér</button>
+            <button class="btn small primary" id="crop-apply">✂ Beskær</button>
           </div>
           <div class="busy" id="busy" hidden>
             <div class="spinner"></div>

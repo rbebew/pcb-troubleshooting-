@@ -83,6 +83,10 @@ export function deleteProjectRaw(id: string): Promise<unknown> {
   });
 }
 
+export function putOverviewImage(projectId: string, image: Blob): Promise<unknown> {
+  return tx(["images"], "readwrite", (t) => t.objectStore("images").put(image, projectId));
+}
+
 // --- Nærbilleder: gemmes under nøglen "<projekt-id>:<billede-id>" ---
 
 const photoKey = (projectId: string, photoId: string) => `${projectId}:${photoId}`;

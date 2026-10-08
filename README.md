@@ -17,6 +17,8 @@ straks dukker op på computeren, og markeringer synkroniseres begge veje.
 | 📷 **Kamera** | Åbner bagkameraet direkte på mobilen. Billeder roteres efter EXIF og skaleres til max 3000 px. |
 | ✨ **AI-genkendelse** | Claude finder komponenter, læser betegnelser (R12, U3 …) og påtryk, vurderer typen, noterer **synlige skader** (brændt, bulnet, revnet) og foreslår strømvejene. |
 | 🩺 **AI-fejlanalyse fra målepunkt** | Sæt et målepunkt hvor du har målt fejlen, skriv forventet/målt spænding og hvad der er galt, og tryk **✨ Analysér fejlen herfra**. AI følger de synlige kobberbaner fra punktet (vist stiplet), finder de forbundne komponenter, rangerer de mest sandsynlige fejlkilder og foreslår næste målinger. Banerne kan med ét tryk gøres til en rigtig strømvej. Analysen bruger automatisk det skarpeste nærbillede der viser punktet. |
+| ✂ **Automatisk beskæring** | Når du tager et nyt billede, finder appen selv printets kanter og foreslår at skære bord og baggrund væk. Kan også bruges på nærbilleder (⋯ → Beskær billedet), og AI kan finde kanterne hvis det ikke lykkes. Markeringerne flyttes med. |
+| 🧩 **Automatisk placering af nærbilleder** | Appen finder selv hvor et nærbillede hører hjemme på oversigten – også hvis det er drejet – ved billedmatching direkte på enheden. Er den i tvivl, spørger den Claude om det omtrentlige sted og finjusterer derefter. |
 | 🔎 **Nærbilleder** | Tag et overbliksbillede og derefter nærbilleder af sektioner. Hvert nærbillede lægges (halvgennemsigtigt) over det sted på oversigten det viser. Alle markeringer deles – en komponent tegnet på et nærbillede vises også på oversigten, og strømveje tegnet på oversigten vises på nærbillederne. AI på et nærbillede læser små SMD-mærkninger meget bedre. |
 | 🔗 **Forbind enheder** | Par mobil og computer med en QR-kode. Billeder, nærbilleder, komponenter, strømveje og målinger synkroniseres automatisk, direkte mellem enhederne. |
 | 🔍 **Offline-søgning** | Finder komponenter ud fra farveforskel til loddestopmasken – virker uden internet og API-nøgle. |
@@ -42,7 +44,7 @@ AI kan tage fejl – især på små SMD-komponenter og ved positionering af boks
 
 1. Tag først et billede af hele printet (oversigten).
 2. Tryk **＋ Nærbillede** øverst i billedet og tag et nærbillede af et område – hold telefonen på samme led som ved oversigten.
-3. Læg nærbilledet over det rigtige sted: træk for at flytte, træk i hjørnerne for at skalere, brug ◐ til gennemsigtighed og ↻ hvis billedet er drejet. Tryk **Gem placering**.
+3. Appen placerer selv nærbilledet (og drejer det om nødvendigt). Tjek at det passer – træk for at flytte, træk i hjørnerne for at skalere, ◐ for gennemsigtighed. **✨ Find automatisk** prøver igen (andet tryk spørger AI). Tryk **Gem placering**.
 4. Skift mellem billederne med knapperne øverst. Under **⋯** kan placeringen justeres, og billedet kan omdøbes eller slettes.
 
 Nærbilleder placeres med flytning og skalering (ikke perspektiv), så tag dem så lige oppefra som muligt.
@@ -99,7 +101,8 @@ src/
   ai.ts           Komponent-genkendelse med Claude (struktureret output)
   sync.ts         Synkronisering mellem enheder (PeerJS/WebRTC)
   connect.ts      Dialogen "Forbind enheder" (QR-kode/parring)
-  localDetect.ts  Offline komponent-søgning (farve-segmentering)
+  localDetect.ts  Offline komponent-søgning og printkant-detektering (farve-segmentering)
+  register.ts     Billedregistrering: finder nærbilleders placering (NCC, grov-til-fin)
   geometry.ts     Geometri, spændingsfortolkning, komponenter langs net
   store.ts        IndexedDB-lager og indstillinger
   image.ts        Indlæsning/skalering af billeder

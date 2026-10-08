@@ -169,6 +169,8 @@ export interface Project {
   updated: number;
   width: number;
   height: number;
+  /** Tælles op når oversigtsbilledet ændres (fx beskæres), så andre enheder henter det igen. */
+  imageVersion?: number;
   components: PcbComponent[];
   nets: Net[];
   traces: Trace[];

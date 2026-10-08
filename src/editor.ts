@@ -29,8 +29,11 @@ export class Editor {
   image: ImageBitmap;
   /** Nærbilledet der vises, eller null for oversigtsbilledet. */
   photo: DetailPhoto | null = null;
-  /** Placering af et nyt/eksisterende nærbillede oven på oversigten. */
-  placing: { image: ImageBitmap; rect: Rect; opacity: number } | null = null;
+  /**
+   * En ramme man justerer på billedet: placering af et nærbillede oven på oversigten (mode "place",
+   * fast højde/bredde-forhold) eller beskæring af det viste billede (mode "crop").
+   */
+  placing: { mode: "place" | "crop"; image: ImageBitmap | null; rect: Rect; opacity: number } | null = null;
 
   scale = 1;
   tx = 0;
@@ -152,8 +155,8 @@ export class Editor {
 
   /** Erstatter data med en nyere version (fx modtaget fra en anden enhed) uden at gemme igen. */
   replaceData(p: Project): void {
-    const { name, updated, components, nets, traces, probes, photos, ai } = p;
-    Object.assign(this.project, { name, updated, components, nets, traces, probes, photos, ai });
+    const { name, updated, width, height, imageVersion, components, nets, traces, probes, photos, ai } = p;
+    Object.assign(this.project, { name, updated, width, height, imageVersion, components, nets, traces, probes, photos, ai });
     if (this.selection && !this.findSelected()) this.selection = null;
     if (this.activeNetId && !this.net(this.activeNetId)) this.activeNetId = this.project.nets[0]?.id ?? null;
     if (this.photo) this.photo = this.project.photos?.find((x) => x.id === this.photo!.id) ?? this.photo;
@@ -162,7 +165,22 @@ export class Editor {
   }
 
   startPlacing(image: ImageBitmap, rect: Rect): void {
-    this.placing = { image, rect, opacity: 0.6 };
+    this.startFrame({ mode: "place", image, rect, opacity: 0.6 });
+  }
+
+  /** Beskæringsramme i projektkoordinater på det viste billede. */
+  startCropping(rect: Rect): void {
+    this.startFrame({ mode: "crop", image: null, rect, opacity: 1 });
+  }
+
+  /** Det viste billedes udstrækning i projektkoordinater. */
+  imageBounds(): Rect {
+    const a = this.mapOut({ x: 0, y: 0 });
+    return { x: a.x, y: a.y, w: this.image.width / this.k, h: this.image.height / this.k };
+  }
+
+  private startFrame(f: NonNullable<Editor["placing"]>): void {
+    this.placing = f;
     this.selection = null;
     this.draft = null;
     this.requestDraw();
@@ -246,6 +264,12 @@ export class Editor {
     this.redoStack = [];
   }
 
+  /** Efter beskæring passer gamle fortryd-trin ikke længere til koordinaterne. */
+  clearHistory(): void {
+    this.undoStack = [];
+    this.redoStack = [];
+  }
+
   get canUndo(): boolean {
     return this.undoStack.length > 0;
   }
@@ -315,6 +339,8 @@ export class Editor {
   }
 
   setTool(t: Tool): void {
+    // Vælger man et værktøj under et beskæringsforslag, beholdes hele billedet.
+    if (this.placing?.mode === "crop") this.placing = null;
     if (this.draft && t !== "trace") this.finishTrace();
     this.tool = t;
     this.canvas.dataset.tool = t;
@@ -581,6 +607,12 @@ export class Editor {
       case "placeMove":
         if (!this.placing) return;
         this.placing.rect = { ...op.orig, x: op.orig.x + ip.x - op.start.x, y: op.orig.y + ip.y - op.start.y };
+        if (this.placing.mode === "crop") {
+          const b = this.imageBounds();
+          const r = this.placing.rect;
+          r.x = Math.max(b.x, Math.min(b.x + b.w - r.w, r.x));
+          r.y = Math.max(b.y, Math.min(b.y + b.h - r.h, r.y));
+        }
         break;
       case "placeResize": {
         if (!this.placing) return;
@@ -592,6 +624,13 @@ export class Editor {
           { x: o.x, y: o.y },
           { x: o.x + o.w, y: o.y },
         ][op.handle];
+        if (this.placing.mode === "crop") {
+          const b = this.imageBounds();
+          const q = { x: Math.max(b.x, Math.min(b.x + b.w, ip.x)), y: Math.max(b.y, Math.min(b.y + b.h, ip.y)) };
+          const r = normalizeRect(fixed, q);
+          if (r.w * this.unit >= 20 && r.h * this.unit >= 20) this.placing.rect = r;
+          break;
+        }
         const w = Math.max(Math.abs(ip.x - fixed.x), Math.abs(ip.y - fixed.y) * aspect, 20 / this.unit);
         const hh = w / aspect;
         const left = op.handle === 0 || op.handle === 3;
@@ -819,10 +858,21 @@ export class Editor {
       const a = this.toScreen(pl.rect);
       const w = pl.rect.w * this.unit;
       const hh = pl.rect.h * this.unit;
-      ctx.save();
-      ctx.globalAlpha = pl.opacity;
-      ctx.drawImage(pl.image, a.x, a.y, w, hh);
-      ctx.restore();
+      if (pl.image) {
+        ctx.save();
+        ctx.globalAlpha = pl.opacity;
+        ctx.drawImage(pl.image, a.x, a.y, w, hh);
+        ctx.restore();
+      } else {
+        // Beskæring: mørklæg det der skæres væk.
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(this.tx, this.ty, imgW, imgH);
+        ctx.rect(a.x, a.y, w, hh);
+        ctx.fillStyle = "rgba(0,0,0,0.6)";
+        ctx.fill("evenodd");
+        ctx.restore();
+      }
       ctx.save();
       ctx.setLineDash([8, 5]);
       ctx.lineWidth = 2;
