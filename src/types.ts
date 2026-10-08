@@ -128,6 +128,17 @@ export interface AiResult {
   at: number;
 }
 
+/** Nærbillede af et udsnit af printet, placeret på oversigtsbilledet. */
+export interface DetailPhoto {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  /** Området på oversigtsbilledet som nærbilledet viser (samme højde/bredde-forhold som billedet). */
+  region: Rect;
+  created: number;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -139,6 +150,8 @@ export interface Project {
   nets: Net[];
   traces: Trace[];
   probes: Probe[];
+  /** Nærbilleder. Alle markeringer gemmes i oversigtsbilledets koordinater og vises på alle billeder. */
+  photos?: DetailPhoto[];
   ai?: AiResult;
 }
 

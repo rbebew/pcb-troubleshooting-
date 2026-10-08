@@ -45,16 +45,31 @@ export function $(sel: string, root: ParentNode = document): HTMLElement {
 }
 
 let toastTimer = 0;
-export function toast(msg: string, kind: "info" | "error" = "info", ms = 3500): void {
+export function toast(msg: string, kind: "info" | "error" = "info", ms = 3500, action?: { label: string; run: () => void }): void {
   let el = document.getElementById("toast");
   if (!el) {
     el = h("div", { id: "toast", role: "status", "aria-live": "polite" });
     document.body.appendChild(el);
   }
-  el.textContent = msg;
-  el.className = `toast show ${kind}`;
+  el.replaceChildren(h("span", null, msg));
+  if (action) {
+    el.appendChild(
+      h(
+        "button",
+        {
+          class: "toast-action",
+          onclick: () => {
+            el!.classList.remove("show");
+            action.run();
+          },
+        },
+        action.label,
+      ),
+    );
+  }
+  el.className = `toast show ${kind}${action ? " has-action" : ""}`;
   clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => el!.classList.remove("show"), ms);
+  toastTimer = window.setTimeout(() => el!.classList.remove("show"), action ? Math.max(ms, 8000) : ms);
 }
 
 export function download(filename: string, blob: Blob): void {

@@ -55,3 +55,17 @@ export function blobToDataUrl(blob: Blob): Promise<string> {
     r.readAsDataURL(blob);
   });
 }
+
+/** Roterer et billede 90° med uret. */
+export async function rotateBlob90(blob: Blob): Promise<{ blob: Blob; width: number; height: number }> {
+  const bmp = await createImageBitmap(blob);
+  const c = document.createElement("canvas");
+  c.width = bmp.height;
+  c.height = bmp.width;
+  const ctx = c.getContext("2d")!;
+  ctx.translate(c.width, 0);
+  ctx.rotate(Math.PI / 2);
+  ctx.drawImage(bmp, 0, 0);
+  bmp.close();
+  return { blob: await canvasToBlob(c, "image/jpeg", 0.92), width: c.width, height: c.height };
+}

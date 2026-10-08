@@ -60,6 +60,7 @@ export async function detectWithClaude(
   settings: Settings,
   extraContext: string,
   signal?: AbortSignal,
+  isDetail = false,
 ): Promise<DetectionOutput> {
   if (!settings.apiKey) throw new Error("Angiv en Anthropic API-nøgle under Indstillinger først.");
 
@@ -69,7 +70,9 @@ export async function detectWithClaude(
   const client = new Anthropic({ apiKey: settings.apiKey, dangerouslyAllowBrowser: true });
 
   const userText =
-    "Identificér komponenterne på dette printkort og beskriv strømvejene." +
+    (isDetail
+      ? "Dette er et nærbillede af et udsnit af printkortet. Identificér komponenterne i udsnittet – medtag kun komponenter der er mindst halvt synlige – og beskriv de strømveje du kan se."
+      : "Identificér komponenterne på dette printkort og beskriv strømvejene.") +
     (extraContext.trim() ? `\n\nOplysninger fra brugeren om kortet/fejlen:\n${extraContext.trim()}` : "");
 
   const useFallbacks = FALLBACK_MODELS.has(settings.model);

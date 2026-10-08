@@ -1,5 +1,5 @@
 import { componentsAlongNet, distToSegment, normalizeRect, pointInRect, probeVerdict } from "./geometry";
-import { STATUS_COLORS, uid, type Net, type PcbComponent, type Point, type Probe, type Project, type Trace } from "./types";
+import { STATUS_COLORS, uid, type DetailPhoto, type Net, type PcbComponent, type Point, type Probe, type Project, type Rect, type Trace } from "./types";
 
 export type Tool = "select" | "component" | "trace" | "probe";
 export type Selection = { kind: "component" | "trace" | "probe" | "net"; id: string } | null;
@@ -14,6 +14,8 @@ type DragOp =
   | { kind: "moveProbe"; id: string; start: Point; orig: Point; snap: boolean }
   | { kind: "moveVertex"; traceId: string; index: number; snap: boolean }
   | { kind: "rect"; start: Point; end: Point }
+  | { kind: "placeMove"; start: Point; orig: Rect }
+  | { kind: "placeResize"; handle: number; orig: Rect }
   | { kind: "pinch"; startDist: number; startMid: Point; scale: number; tx: number; ty: number };
 
 const TAP_SLOP = 7;
@@ -23,7 +25,12 @@ export class Editor {
   readonly canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   project: Project;
+  /** Billedet der vises nu (oversigt eller nærbillede). */
   image: ImageBitmap;
+  /** Nærbilledet der vises, eller null for oversigtsbilledet. */
+  photo: DetailPhoto | null = null;
+  /** Placering af et nyt/eksisterende nærbillede oven på oversigten. */
+  placing: { image: ImageBitmap; rect: Rect; opacity: number } | null = null;
 
   scale = 1;
   tx = 0;
@@ -90,13 +97,82 @@ export class Editor {
   }
 
   // ---------- Koordinater ----------
+  //
+  // Markeringer gemmes altid i oversigtsbilledets koordinater ("projektkoordinater").
+  // Når et nærbillede vises, omregnes de via nærbilledets placering (region) på oversigten.
+  // `scale` er skærmpixels pr. pixel i det viste billede; `unit` er skærmpixels pr. projektenhed.
+
+  /** Pixels i det viste billede pr. projektenhed. */
+  get k(): number {
+    return this.photo ? this.image.width / this.photo.region.w : 1;
+  }
+
+  get unit(): number {
+    return this.scale * this.k;
+  }
+
+  /** Projektkoordinat -> pixel i det viste billede. */
+  mapIn(p: Point): Point {
+    if (!this.photo) return p;
+    const r = this.photo.region;
+    return { x: (p.x - r.x) * this.k, y: (p.y - r.y) * this.k };
+  }
+
+  /** Pixel i det viste billede -> projektkoordinat. */
+  mapOut(p: Point): Point {
+    if (!this.photo) return p;
+    const r = this.photo.region;
+    return { x: p.x / this.k + r.x, y: p.y / this.k + r.y };
+  }
+
+  /** Omregner en boks fra det viste billede til projektkoordinater. */
+  rectOut(r: Rect): Rect {
+    const a = this.mapOut(r);
+    return { x: a.x, y: a.y, w: r.w / this.k, h: r.h / this.k };
+  }
 
   toImage(sx: number, sy: number): Point {
-    return { x: (sx - this.tx) / this.scale, y: (sy - this.ty) / this.scale };
+    return this.mapOut({ x: (sx - this.tx) / this.scale, y: (sy - this.ty) / this.scale });
   }
 
   toScreen(p: Point): Point {
-    return { x: p.x * this.scale + this.tx, y: p.y * this.scale + this.ty };
+    const q = this.mapIn(p);
+    return { x: q.x * this.scale + this.tx, y: q.y * this.scale + this.ty };
+  }
+
+  /** Skift til et andet billede (oversigt: photo = null). */
+  setPhoto(photo: DetailPhoto | null, image: ImageBitmap): void {
+    this.photo = photo;
+    this.image = image;
+    this.draft = null;
+    this.op = null;
+    this.fit();
+    this.onUi();
+  }
+
+  /** Erstatter data med en nyere version (fx modtaget fra en anden enhed) uden at gemme igen. */
+  replaceData(p: Project): void {
+    const { name, updated, components, nets, traces, probes, photos, ai } = p;
+    Object.assign(this.project, { name, updated, components, nets, traces, probes, photos, ai });
+    if (this.selection && !this.findSelected()) this.selection = null;
+    if (this.activeNetId && !this.net(this.activeNetId)) this.activeNetId = this.project.nets[0]?.id ?? null;
+    if (this.photo) this.photo = this.project.photos?.find((x) => x.id === this.photo!.id) ?? this.photo;
+    this.requestDraw();
+    this.onUi();
+  }
+
+  startPlacing(image: ImageBitmap, rect: Rect): void {
+    this.placing = { image, rect, opacity: 0.6 };
+    this.selection = null;
+    this.draft = null;
+    this.requestDraw();
+    this.onUi();
+  }
+
+  stopPlacing(): void {
+    this.placing = null;
+    this.requestDraw();
+    this.onUi();
   }
 
   private eventPoint(e: PointerEvent | WheelEvent): Point {
@@ -135,7 +211,7 @@ export class Editor {
 
   zoomBy(factor: number, center?: Point): void {
     const c = center ?? { x: this.viewW / 2, y: this.viewH / 2 };
-    const before = this.toImage(c.x, c.y);
+    const before = { x: (c.x - this.tx) / this.scale, y: (c.y - this.ty) / this.scale };
     const minScale = Math.min(this.viewW / this.image.width, this.viewH / this.image.height) * 0.3;
     this.scale = Math.max(minScale, Math.min(40, this.scale * factor));
     this.tx = c.x - before.x * this.scale;
@@ -143,13 +219,16 @@ export class Editor {
     this.requestDraw();
   }
 
+  /** Centrerer visningen på en boks i projektkoordinater. */
   centerOn(r: { x: number; y: number; w?: number; h?: number }): void {
-    const w = r.w ?? 0;
-    const hh = r.h ?? 0;
+    const k = this.k;
+    const w = (r.w ?? 0) * k;
+    const hh = (r.h ?? 0) * k;
+    const c = this.mapIn({ x: r.x + (r.w ?? 0) / 2, y: r.y + (r.h ?? 0) / 2 });
     const target = Math.min(this.viewW / Math.max(w * 4, 80), this.viewH / Math.max(hh * 4, 80));
     if (this.scale < target * 0.6 || this.scale > target * 3) this.scale = target;
-    this.tx = this.viewW / 2 - (r.x + w / 2) * this.scale;
-    this.ty = this.viewH / 2 - (r.y + hh / 2) * this.scale;
+    this.tx = this.viewW / 2 - c.x * this.scale;
+    this.ty = this.viewH / 2 - c.y * this.scale;
     this.requestDraw();
   }
 
@@ -296,7 +375,7 @@ export class Editor {
 
   /** Snap til eksisterende knudepunkter, målepunkter eller komponentcentre. */
   private snap(p: Point, excludeTrace?: string): Point {
-    const r = 14 / this.scale;
+    const r = 14 / this.unit;
     let best: Point | null = null;
     let bestD = r;
     const consider = (q: Point) => {
@@ -320,7 +399,7 @@ export class Editor {
 
   private hitComponent(p: Point): PcbComponent | undefined {
     if (!this.showComponents) return undefined;
-    const pad = 3 / this.scale;
+    const pad = 3 / this.unit;
     let best: PcbComponent | undefined;
     for (const c of this.project.components) {
       if (pointInRect(p, c, pad) && (!best || c.w * c.h < best.w * best.h)) best = c;
@@ -329,12 +408,12 @@ export class Editor {
   }
 
   private hitProbe(p: Point): Probe | undefined {
-    const r = 12 / this.scale;
+    const r = 12 / this.unit;
     return [...this.project.probes].reverse().find((pr) => Math.hypot(pr.x - p.x, pr.y - p.y) <= r);
   }
 
   private hitTrace(p: Point): Trace | undefined {
-    const r = 9 / this.scale;
+    const r = 9 / this.unit;
     for (const t of [...this.project.traces].reverse()) {
       if (!this.net(t.netId)?.visible) continue;
       for (let i = 0; i < t.points.length - 1; i++) {
@@ -364,6 +443,10 @@ export class Editor {
 
   /** Skærmkoordinater for hjørnehåndtag: tl, tr, br, bl. */
   private handlePoints(c: PcbComponent): Point[] {
+    return this.rectCorners(c);
+  }
+
+  private rectCorners(c: Rect): Point[] {
     const a = this.toScreen({ x: c.x, y: c.y });
     const b = this.toScreen({ x: c.x + c.w, y: c.y + c.h });
     return [
@@ -402,6 +485,15 @@ export class Editor {
       return;
     }
 
+    if (this.placing) {
+      const pr = this.placing.rect;
+      const handle = this.rectCorners(pr).findIndex((hp) => Math.abs(hp.x - sp.x) <= HANDLE_PX + 4 && Math.abs(hp.y - sp.y) <= HANDLE_PX + 4);
+      if (handle >= 0) this.op = { kind: "placeResize", handle, orig: { ...pr } };
+      else if (pointInRect(ip, pr)) this.op = { kind: "placeMove", start: ip, orig: { ...pr } };
+      else this.op = { kind: "tap", startX: sp.x, startY: sp.y };
+      return;
+    }
+
     if (this.tool === "component") {
       this.op = { kind: "rect", start: ip, end: ip };
       return;
@@ -428,7 +520,7 @@ export class Editor {
       const c = this.hitComponent(ip);
       const t = this.hitTrace(ip);
       // Banen vinder over en stor komponent hvis man rammer selve linjen.
-      if (t && (!c || this.selection?.kind === "trace" || c.w * c.h * this.scale * this.scale > 2500)) {
+      if (t && (!c || this.selection?.kind === "trace" || c.w * c.h * this.unit * this.unit > 2500)) {
         this.select({ kind: "trace", id: t.id });
         this.op = { kind: "tap", startX: sp.x, startY: sp.y };
         return;
@@ -486,11 +578,32 @@ export class Editor {
       case "rect":
         op.end = ip;
         break;
+      case "placeMove":
+        if (!this.placing) return;
+        this.placing.rect = { ...op.orig, x: op.orig.x + ip.x - op.start.x, y: op.orig.y + ip.y - op.start.y };
+        break;
+      case "placeResize": {
+        if (!this.placing) return;
+        const o = op.orig;
+        const aspect = o.w / o.h;
+        const fixed = [
+          { x: o.x + o.w, y: o.y + o.h },
+          { x: o.x, y: o.y + o.h },
+          { x: o.x, y: o.y },
+          { x: o.x + o.w, y: o.y },
+        ][op.handle];
+        const w = Math.max(Math.abs(ip.x - fixed.x), Math.abs(ip.y - fixed.y) * aspect, 20 / this.unit);
+        const hh = w / aspect;
+        const left = op.handle === 0 || op.handle === 3;
+        const top = op.handle === 0 || op.handle === 1;
+        this.placing.rect = { x: left ? fixed.x - w : fixed.x, y: top ? fixed.y - hh : fixed.y, w, h: hh };
+        break;
+      }
       case "move": {
         const c = this.component(op.id);
         if (!c) return;
         if (!op.snap) {
-          if (Math.hypot(ip.x - op.start.x, ip.y - op.start.y) * this.scale < TAP_SLOP) return;
+          if (Math.hypot(ip.x - op.start.x, ip.y - op.start.y) * this.unit < TAP_SLOP) return;
           this.checkpoint();
           op.snap = true;
         }
@@ -519,7 +632,7 @@ export class Editor {
         const pr = this.probe(op.id);
         if (!pr) return;
         if (!op.snap) {
-          if (Math.hypot(ip.x - op.start.x, ip.y - op.start.y) * this.scale < TAP_SLOP) return;
+          if (Math.hypot(ip.x - op.start.x, ip.y - op.start.y) * this.unit < TAP_SLOP) return;
           this.checkpoint();
           op.snap = true;
         }
@@ -564,6 +677,7 @@ export class Editor {
   };
 
   private handleTap(sp: Point, pointerType: string): void {
+    if (this.placing) return;
     const ip = this.toImage(sp.x, sp.y);
     const now = performance.now();
     const isDouble = now - this.lastTap.t < 350 && Math.hypot(sp.x - this.lastTap.x, sp.y - this.lastTap.y) < 24;
@@ -617,7 +731,7 @@ export class Editor {
 
   /** Net hvis bane ligger under punktet. */
   private netAt(p: Point): string | undefined {
-    const r = 10 / this.scale;
+    const r = 10 / this.unit;
     for (const t of this.project.traces) {
       for (let i = 0; i < t.points.length - 1; i++) {
         if (distToSegment(p, t.points[i], t.points[i + 1]) <= r) return t.netId;
@@ -631,9 +745,9 @@ export class Editor {
 
   private finishRect(a: Point, b: Point): void {
     const r = normalizeRect(a, b);
-    if (r.w * this.scale < 6 || r.h * this.scale < 6) {
+    if (r.w * this.unit < 6 || r.h * this.unit < 6) {
       // Et tryk: lav en standardboks omkring punktet.
-      const s = 24 / this.scale;
+      const s = 24 / this.unit;
       r.x = a.x - s / 2;
       r.y = a.y - s / 2;
       r.w = s;
@@ -675,19 +789,47 @@ export class Editor {
     ctx.drawImage(this.image, 0, 0);
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const imgW = this.image.width * this.scale;
+    const imgH = this.image.height * this.scale;
     if (this.focusNetId) {
       ctx.fillStyle = "rgba(0,0,0,0.45)";
-      const a = this.toScreen({ x: 0, y: 0 });
-      ctx.fillRect(a.x, a.y, this.image.width * this.scale, this.image.height * this.scale);
+      ctx.fillRect(this.tx, this.ty, imgW, imgH);
     }
+    ctx.save();
+    if (this.photo) {
+      // Markeringer uden for nærbilledet giver ikke mening at vise.
+      ctx.beginPath();
+      ctx.rect(this.tx, this.ty, imgW, imgH);
+      ctx.clip();
+    }
+    if (!this.photo && !this.placing) this.drawRegions(ctx);
     renderOverlay(ctx, this.project, {
       toScreen: (p) => this.toScreen(p),
-      scale: this.scale,
+      scale: this.unit,
       selection: this.selection,
       focusNetId: this.focusNetId,
       showLabels: this.showLabels,
       showComponents: this.showComponents,
     });
+    ctx.restore();
+
+    if (this.placing) {
+      const pl = this.placing;
+      const a = this.toScreen(pl.rect);
+      const w = pl.rect.w * this.unit;
+      const hh = pl.rect.h * this.unit;
+      ctx.save();
+      ctx.globalAlpha = pl.opacity;
+      ctx.drawImage(pl.image, a.x, a.y, w, hh);
+      ctx.restore();
+      ctx.save();
+      ctx.setLineDash([8, 5]);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#ffd60a";
+      ctx.strokeRect(a.x, a.y, w, hh);
+      ctx.restore();
+      for (const hp of this.rectCorners(pl.rect)) handle(ctx, hp);
+    }
 
     // Kladde til ny strømvej.
     if (this.draft && this.draft.length) {
@@ -727,18 +869,47 @@ export class Editor {
     }
   }
 
-  /** Renderer det annoterede print i fuld opløsning (til eksport). */
+  /** Nærbillederne tegnes som stiplede rammer på oversigten. */
+  private drawRegions(ctx: CanvasRenderingContext2D): void {
+    const photos = this.project.photos ?? [];
+    if (!photos.length) return;
+    ctx.save();
+    ctx.font = "600 11px system-ui, sans-serif";
+    ctx.textBaseline = "top";
+    for (const ph of photos) {
+      const a = this.toScreen(ph.region);
+      const w = ph.region.w * this.unit;
+      const hh = ph.region.h * this.unit;
+      ctx.setLineDash([6, 5]);
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = "rgba(255,255,255,0.75)";
+      ctx.strokeRect(a.x, a.y, w, hh);
+      ctx.setLineDash([]);
+      const label = `📷 ${ph.name}`;
+      const tw = ctx.measureText(label).width;
+      ctx.fillStyle = "rgba(0,0,0,0.65)";
+      ctx.fillRect(a.x, a.y + hh - 16, tw + 8, 16);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(label, a.x + 4, a.y + hh - 14);
+    }
+    ctx.restore();
+  }
+
+  /** Renderer det viste billede med markeringer i fuld opløsning (til eksport). */
   renderFullRes(): HTMLCanvasElement {
     const c = document.createElement("canvas");
     c.width = this.image.width;
     c.height = this.image.height;
     const ctx = c.getContext("2d")!;
     ctx.drawImage(this.image, 0, 0);
-    const k = Math.max(1, Math.max(c.width, c.height) / 1400);
-    ctx.scale(k, k);
+    const kk = Math.max(1, Math.max(c.width, c.height) / 1400);
+    ctx.scale(kk, kk);
     renderOverlay(ctx, this.project, {
-      toScreen: (p) => ({ x: p.x / k, y: p.y / k }),
-      scale: 1 / k,
+      toScreen: (p) => {
+        const q = this.mapIn(p);
+        return { x: q.x / kk, y: q.y / kk };
+      },
+      scale: this.k / kk,
       selection: null,
       focusNetId: null,
       showLabels: true,
