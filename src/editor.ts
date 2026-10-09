@@ -46,6 +46,8 @@ export class Editor {
   focusNetId: string | null = null;
   draft: Point[] | null = null;
   showLabels = true;
+  /** Steder et AI-svar peger på (vises som gule nåle). */
+  highlights: { x: number; y: number; label: string }[] = [];
   /** Hvor meget af lærredet forneden der er dækket (af detaljepanelet på mobil). */
   viewInsetBottom = 0;
   showComponents = true;
@@ -857,6 +859,7 @@ export class Editor {
     });
     this.drawProbeAnalysis(ctx);
     this.drawGuideStep(ctx);
+    this.drawHighlights(ctx);
     ctx.restore();
 
     if (this.placing) {
@@ -924,6 +927,39 @@ export class Editor {
       const t = this.trace(this.selection.id);
       if (t) for (const q of t.points) handle(ctx, this.toScreen(q));
     }
+  }
+
+  private drawHighlights(ctx: CanvasRenderingContext2D): void {
+    if (!this.highlights.length) return;
+    ctx.save();
+    ctx.font = "700 12px system-ui, sans-serif";
+    ctx.textBaseline = "middle";
+    this.highlights.forEach((h, i) => {
+      const p = this.toScreen(h);
+      // Nål: cirkel med nummer og en label ved siden af.
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 16, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(255,214,10,0.9)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 10, 0, Math.PI * 2);
+      ctx.fillStyle = "#ffd60a";
+      ctx.fill();
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = "#000";
+      ctx.textAlign = "center";
+      ctx.fillText(String(i + 1), p.x, p.y + 0.5);
+      ctx.textAlign = "left";
+      const tw = ctx.measureText(h.label).width;
+      ctx.fillStyle = "rgba(0,0,0,0.78)";
+      ctx.fillRect(p.x + 19, p.y - 9, tw + 10, 18);
+      ctx.fillStyle = "#ffd60a";
+      ctx.fillText(h.label, p.x + 24, p.y);
+    });
+    ctx.restore();
   }
 
   /** Fejlsøgningsguidens aktuelle måling: hvor den røde og sorte probe skal sættes. */

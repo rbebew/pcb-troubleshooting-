@@ -227,6 +227,25 @@ export interface Guide {
   model: string;
 }
 
+/** Et punkt AI'en peger på i et svar (projektkoordinater). */
+export interface ChatPoint {
+  x: number;
+  y: number;
+  label: string;
+}
+
+/** Spørgsmål og svar om målinger (uafhængigt af guidens skridt). */
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  /** Hvad spørgsmålet handler om, fx "Skridt 2: Mål modstand …" eller "Måling M1". */
+  subject: string;
+  points?: ChatPoint[];
+  model?: string;
+  at: number;
+}
+
 export interface AiPowerPath {
   name: string;
   voltage: string;
@@ -272,6 +291,8 @@ export interface Project {
   ai?: AiResult;
   /** Igangværende AI-fejlsøgningsguide. */
   guide?: Guide;
+  /** Spørgsmål til AI om målinger og kortet. */
+  chat?: ChatMessage[];
 }
 
 export function uid(): string {

@@ -1,5 +1,5 @@
 import "./style.css";
-import { analyzeProbe, describeApiError, detectWithClaude, findBoardWithClaude, locateDetailWithClaude, nextGuideStep } from "./ai";
+import { analyzeProbe, askAboutMeasurement, describeApiError, detectWithClaude, findBoardWithClaude, locateDetailWithClaude, nextGuideStep } from "./ai";
 import { currentGuideStep, frameGuideStep } from "./guidePanel";
 import { $, download, formatDate, h, toast } from "./dom";
 import { Editor, type Tool } from "./editor";
@@ -10,7 +10,7 @@ import { grayFromRgba, locateDetail, type Gray, type Hint } from "./register";
 import { Panel } from "./panel";
 import * as store from "./store";
 import type { SyncEvent } from "./sync";
-import { COMPONENT_TYPES, NET_PRESETS, STATUS_COLORS, uid, type DetailPhoto, type Guide, type GuideGoal, type GuideStep, type PcbComponent, type Project, type Rect } from "./types";
+import { COMPONENT_TYPES, METER_MODES, NET_PRESETS, STATUS_COLORS, uid, type ChatPoint, type DetailPhoto, type Guide, type GuideGoal, type GuideStep, type PcbComponent, type Project, type Rect } from "./types";
 
 let settings = store.loadSettings();
 let editor: Editor | null = null;
@@ -156,6 +156,15 @@ async function openProject(id: string): Promise<void> {
     },
     retryGuide: () => runGuide(),
     correctGuideAnswer,
+    askAi,
+    showChatPoints,
+    useAnswerInGuide,
+    clearChat: () => {
+      if (!editor) return;
+      editor.project.chat = [];
+      editor.highlights = [];
+      editor.changed();
+    },
     endGuide,
   });
   ($("#project-name") as HTMLInputElement).value = p.name;
@@ -910,6 +919,123 @@ function answerGuide(result: string, skipped: boolean): void {
   runGuide();
 }
 
+// ---------- Spørg AI ----------
+
+/** Beskriver emnet for et spørgsmål og de punkter der skal markeres. */
+function chatSubjectInfo(ed: Editor, subject: string): { label: string; details: string; points: ChatPoint[] } {
+  const g = ed.project.guide;
+  if (subject.startsWith("step:") && g) {
+    const i = g.steps.findIndex((s) => s.id === subject.slice(5));
+    const st = g.steps[i];
+    if (st) {
+      const m = METER_MODES[st.mode];
+      return {
+        label: `Skridt ${i + 1}: ${st.title}`,
+        details: [
+          `Multimeter: ${m.label} (${st.range || "auto"}), strøm ${st.power === "on" ? "TIL" : "FRA"}.`,
+          `Rød probe: ${st.red.where}. Sort probe: ${st.black.where}.`,
+          `Forventet: ${st.expected}.`,
+          `Resultat: ${st.result === undefined ? "ikke målt endnu" : st.skipped ? `kunne ikke måles (${st.result})` : st.result}.`,
+          st.why ? `Formål: ${st.why}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        points: [
+          { x: st.red.x, y: st.red.y, label: "Rød" },
+          { x: st.black.x, y: st.black.y, label: "Sort" },
+        ],
+      };
+    }
+  }
+  if (subject.startsWith("probe:")) {
+    const pr = ed.probe(subject.slice(6));
+    if (pr) {
+      return {
+        label: `Måling ${pr.label}`,
+        details: `${pr.kind === "resistance" ? "Modstand" : "Spænding"} på net ${ed.net(pr.netId)?.name || "ukendt"}. Forventet: ${pr.expected || "?"}. Målt: ${pr.measured || "?"}.${pr.notes ? ` Noter: ${pr.notes}` : ""}`,
+        points: [{ x: pr.x, y: pr.y, label: pr.label }],
+      };
+    }
+  }
+  return { label: "kortet generelt", details: "", points: [] };
+}
+
+async function askAi(question: string, subject: string): Promise<void> {
+  const ed = editor;
+  if (!ed) return;
+  if (!settings.apiKey) {
+    toast("Angiv din Anthropic API-nøgle først.");
+    openSettings();
+    return;
+  }
+  const info = chatSubjectInfo(ed, subject);
+  const chat = (ed.project.chat ??= []);
+  const history = [...chat];
+  chat.push({ id: uid(), role: "user", text: question, subject: info.label, at: Date.now() });
+  ed.changed();
+  const ctrl = new AbortController();
+  const done = showBusy("Claude svarer …", () => ctrl.abort());
+  try {
+    const res = await askAboutMeasurement(
+      {
+        image: ed.image,
+        toPixel: (p) => ed.mapIn(p),
+        toProject: (p) => ed.mapOut(p),
+        components: ed.project.components,
+        guide: ed.project.guide,
+        probes: ed.project.probes.map((x) => ({ label: x.label, net: ed.net(x.netId)?.name ?? "", kind: x.kind ?? "voltage", expected: x.expected, measured: x.measured, notes: x.notes, x: x.x, y: x.y })),
+        subject: info,
+        chat: history,
+        question,
+        isDetail: !!ed.photo,
+      },
+      settings,
+      ctrl.signal,
+    );
+    if (editor !== ed) return;
+    const msg = { id: uid(), role: "assistant" as const, text: res.answer, subject: info.label, points: res.points, model: res.model, at: Date.now() };
+    chat.push(msg);
+    ed.changed();
+    if (res.points.length) showChatPoints(msg.id);
+    panel?.render();
+  } catch (err) {
+    // Spørgsmålet bliver stående, så man kan se hvad man spurgte om.
+    if (ctrl.signal.aborted) toast("Annulleret.");
+    else {
+      console.error(err);
+      toast(describeApiError(err), "error", 8000);
+    }
+  } finally {
+    done();
+  }
+}
+
+function showChatPoints(messageId: string): void {
+  const ed = editor;
+  const m = ed?.project.chat?.find((x) => x.id === messageId);
+  if (!ed || !m?.points?.length) return;
+  ed.highlights = m.points;
+  const xs = m.points.map((p) => p.x);
+  const ys = m.points.map((p) => p.y);
+  const pad = 60 / ed.k;
+  ed.centerOn({ x: Math.min(...xs) - pad, y: Math.min(...ys) - pad, w: Math.max(...xs) - Math.min(...xs) + 2 * pad, h: Math.max(...ys) - Math.min(...ys) + 2 * pad });
+}
+
+/** Guiden planlægger det ventende skridt forfra ud fra spørgsmål og svar. */
+function useAnswerInGuide(messageId: string): void {
+  const ed = editor;
+  const g = ed?.project.guide;
+  const chat = ed?.project.chat ?? [];
+  const i = chat.findIndex((x) => x.id === messageId);
+  if (!ed || !g || i < 0) return;
+  const answer = chat[i];
+  const question = chat.slice(0, i).reverse().find((x) => x.role === "user");
+  const pending = currentGuideStep(g);
+  if (pending) g.steps = g.steps.filter((s) => s !== pending);
+  ed.changed();
+  runGuide(`Brugeren spurgte (om ${answer.subject}): "${question?.text ?? ""}". Svaret var: "${answer.text}". Tag højde for dette i det næste skridt.`);
+}
+
 /** Ret et tidligere svar. Målepunkt/strømvej opdateres, og AI vurderer næste skridt igen. */
 function correctGuideAnswer(stepId: string, result: string): void {
   const ed = editor;
@@ -1002,6 +1128,7 @@ async function runGuide(note?: string): Promise<void> {
     if (editor !== ed || ed.project.guide !== g) return;
     g.assessment = res.assessment;
     g.model = res.model;
+    ed.highlights = []; // gamle markeringer fra Spørg AI hører til det forrige skridt
     if (res.step) g.steps.push(res.step);
     if (res.conclusion) g.conclusion = res.conclusion;
     ed.selection = null;

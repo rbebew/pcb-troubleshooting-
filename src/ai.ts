@@ -10,6 +10,8 @@ import {
   METER_MODES,
   uid,
   type AiResult,
+  type ChatMessage,
+  type ChatPoint,
   type ComponentType,
   type Guide,
   type GuideStep,
@@ -707,6 +709,118 @@ export async function nextGuideStep(input: GuideInput, settings: Settings, signa
           })),
         }
       : null,
+    model,
+  };
+}
+
+// ---------- Spørgsmål om målinger ----------
+
+const AskSchema = z.object({
+  answer: z.string().describe("Svaret til brugeren. Dansk, konkret og kort – brugeren står ved printet med multimeteret."),
+  points: z
+    .array(z.object({ x: z.number(), y: z.number(), label: z.string() }))
+    .describe("Steder på billedet svaret henviser til (normaliseret 0-1000), fx hvor et GND-punkt eller et ben sidder. Tom liste hvis ikke relevant."),
+});
+
+const ASK_SYSTEM_PROMPT = `Du er en erfaren elektronikreparatør der hjælper en bruger med at fejlsøge et printkort med et multimeter. Brugeren stiller et spørgsmål om en måling, et målepunkt eller kortet generelt.
+
+Du får fotoet af printet (rent og med kendte komponenter markeret med cyan rammer og indeks #n; det emne spørgsmålet handler om er markeret med gul), fejlsøgningens historik, alle målinger og den hidtidige samtale.
+
+- Svar direkte på spørgsmålet. Forklar gerne hvad en måling betyder, om en værdi er normal, hvorfor den kan opføre sig sådan (fx en værdi der stiger pga. kondensatorer), hvor man finder et punkt, og hvordan man måler sikkert.
+- Hvis svaret henviser til steder på printet, så angiv dem i points (normaliseret 0-1000 i billedet) med en kort label.
+- Hvis det tyder på at en måling er udført forkert (forkert punkt, forkert indstilling, strøm til/fra), så sig det tydeligt og foreslå at brugeren retter målingen med "✎ Ret" i guiden.
+- Ved netspænding: advar tydeligt.
+- Svar på dansk. Brug korte afsnit eller punktopstilling hvis det hjælper.`;
+
+export interface AskInput {
+  image: ImageBitmap;
+  toPixel: (p: Point) => Point;
+  toProject: (p: Point) => Point;
+  components: PcbComponent[];
+  guide?: Guide;
+  probes: { label: string; net: string; kind: string; expected: string; measured: string; notes: string; x: number; y: number }[];
+  /** Hvad spørgsmålet handler om, i tekst, og de punkter der skal markeres. */
+  subject: { label: string; details: string; points: ChatPoint[] };
+  chat: ChatMessage[];
+  question: string;
+  isDetail: boolean;
+}
+
+export async function askAboutMeasurement(input: AskInput, settings: Settings, signal?: AbortSignal): Promise<{ answer: string; points: ChatPoint[]; model: string }> {
+  if (!settings.apiKey) throw new Error("Angiv en Anthropic API-nøgle under Indstillinger først.");
+  const { image, toPixel, toProject } = input;
+  const { clean, marked, W, H, s, compLines, norm } = prepareBoardImages(image, toPixel, input.components, (ctx, sc, lw) => {
+    ctx.font = `700 ${Math.round(Math.max(12, ctx.canvas.width / 90))}px sans-serif`;
+    ctx.textBaseline = "bottom";
+    for (const p of input.subject.points) {
+      const q = toPixel(p);
+      const x = q.x * sc;
+      const y = q.y * sc;
+      const r = Math.max(9, ctx.canvas.width / 90);
+      ctx.strokeStyle = "#ffd60a";
+      ctx.lineWidth = lw * 2;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = "#ffd60a";
+      ctx.fillText(p.label, x + r + 3, y - 2);
+    }
+  });
+  const pos = (p: Point) => {
+    const q = toPixel(p);
+    return `x=${norm(q.x * s, W)}, y=${norm(q.y * s, H)}`;
+  };
+
+  const g = input.guide;
+  const history = g
+    ? g.steps
+        .map(
+          (st, i) =>
+            `Skridt ${i + 1}: ${st.title} – ${METER_MODES[st.mode].label}, strøm ${st.power === "on" ? "TIL" : "FRA"}, rød: ${st.red.where}, sort: ${st.black.where}, forventet: ${st.expected}, resultat: ${
+              st.result === undefined ? "ikke målt endnu" : st.skipped ? `kunne ikke måles (${st.result})` : st.result
+            }${st.correctedFrom !== undefined ? ` (rettet fra "${st.correctedFrom}")` : ""}`,
+        )
+        .join("\n")
+    : "";
+  const chat = input.chat
+    .slice(-12)
+    .map((m) => `${m.role === "user" ? "Bruger" : "Dig"} (om ${m.subject}): ${m.text}`)
+    .join("\n");
+
+  const userText = [
+    input.isDetail ? "Fotoet er et nærbillede af et udsnit af printet." : "Fotoet viser hele printet.",
+    g ? `Fejlsøgning: ${GUIDE_GOALS[g.goal]}.${g.description ? ` Brugerens beskrivelse: ${g.description}` : ""}${g.assessment ? `\nStatus: ${g.assessment}` : ""}` : "",
+    history ? `Guidens skridt:\n${history}` : "",
+    input.probes.length
+      ? `Målinger:\n${input.probes.map((p) => `- ${p.label} (${p.kind === "resistance" ? "modstand" : "spænding"}, ${p.net || "ukendt net"}) ved ${pos(p)}: forventet ${p.expected || "?"}, målt ${p.measured || "?"}${p.notes ? ` – ${p.notes}` : ""}`).join("\n")}`
+      : "",
+    compLines.length ? `Kendte komponenter i billedet:\n${compLines.join("\n")}` : "",
+    chat ? `Samtalen indtil nu:\n${chat}` : "",
+    `Spørgsmålet handler om: ${input.subject.label}${input.subject.details ? `\n${input.subject.details}` : ""}`,
+    `Brugerens spørgsmål: ${input.question}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const client = new Anthropic({ apiKey: settings.apiKey, dangerouslyAllowBrowser: true });
+  const { out, model } = await callClaude(
+    client,
+    settings,
+    ASK_SYSTEM_PROMPT,
+    AskSchema,
+    [
+      { type: "text", text: "Billede 1 (rent foto):" },
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: await toBase64Jpeg(clean) } },
+      { type: "text", text: "Billede 2 (komponenter og emnet markeret):" },
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: await toBase64Jpeg(marked) } },
+      { type: "text", text: userText },
+    ],
+    signal,
+  );
+  const clamp = (v: number) => Math.max(0, Math.min(1000, v));
+  return {
+    answer: out.answer.trim(),
+    points: out.points.map((p) => ({ ...toProject({ x: ((clamp(p.x) / 1000) * W) / s, y: ((clamp(p.y) / 1000) * H) / s }), label: p.label })),
     model,
   };
 }

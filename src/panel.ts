@@ -1,5 +1,5 @@
 import { h } from "./dom";
-import { renderGuide, type GuideHooks } from "./guidePanel";
+import { renderGuide, setChatSubject, type GuideHooks } from "./guidePanel";
 import type { Editor } from "./editor";
 import { componentsAlongNet, probeVerdict } from "./geometry";
 import {
@@ -646,6 +646,20 @@ export class Panel {
         "div",
         { class: "row between" },
         h("button", { class: "btn primary small", onclick: () => this.hooks.analyzeProbe(p.id) }, p.ai ? "✨ Analysér igen" : "✨ Analysér fejlen herfra"),
+        h(
+          "button",
+          {
+            class: "btn small",
+            onclick: () => {
+              setChatSubject(`probe:${p.id}`);
+              this.ed.select(null);
+              this.tab = "guide";
+              this.render();
+              this.root.querySelector<HTMLTextAreaElement>(".chat textarea")?.focus();
+            },
+          },
+          "💬 Spørg",
+        ),
         h("button", { class: "btn danger small", onclick: () => ed.deleteSelection() }, "Slet"),
       ),
       p.ai ? this.probeAnalysisView(p) : h("p", { class: "muted small" }, "AI følger de synlige kobberbaner fra punktet og peger på de komponenter, der mest sandsynligt forklarer målingen."),

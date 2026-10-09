@@ -10,6 +10,13 @@ export interface GuideHooks {
   continueGuide: () => void;
   retryGuide: () => void;
   endGuide: () => void;
+  /** Stil AI et spørgsmål om et emne ("step:<id>", "probe:<id>" eller "general"). */
+  askAi: (question: string, subject: string) => void;
+  /** Vis de steder et svar henviser til på billedet. */
+  showChatPoints: (messageId: string) => void;
+  /** Lad guiden planlægge det næste skridt forfra ud fra et svar. */
+  useAnswerInGuide: (messageId: string) => void;
+  clearChat: () => void;
 }
 
 /** Hurtigsvar der passer til multimeterets indstilling. */
@@ -23,6 +30,15 @@ const QUICK_ANSWERS: Record<MeterMode, string[]> = {
 };
 
 let selectedGoal: GuideGoal = "dead";
+/** Hvad det næste spørgsmål handler om. Null = automatisk (det aktuelle skridt eller generelt). */
+let chatSubject: string | null = null;
+let chatDraft = "";
+
+/** Vælg emnet for næste spørgsmål (bruges fx fra et målepunkt i Målinger-fanen). */
+export function setChatSubject(subject: string): void {
+  chatSubject = subject;
+}
+
 /** Skridt hvis svar er ved at blive rettet. */
 let editingStepId: string | null = null;
 let draftDescription = "";
@@ -46,9 +62,13 @@ export function currentGuideStep(g: Guide | undefined): GuideStep | undefined {
 export function renderGuide(body: HTMLElement, ed: Editor, hooks: GuideHooks, rerender: () => void): void {
   const g = ed.project.guide;
   if (!g) {
-    body.append(startCard(hooks, rerender), meterHelp());
+    body.append(startCard(hooks, rerender), chatCard(ed, hooks, rerender), meterHelp());
     return;
   }
+  renderActiveGuide(body, ed, g, hooks, rerender, chatCard(ed, hooks, rerender));
+}
+
+function renderActiveGuide(body: HTMLElement, ed: Editor, g: Guide, hooks: GuideHooks, rerender: () => void, chat: HTMLElement): void {
 
   if (g.assessment) body.append(h("div", { class: "callout" }, h("b", null, "Status: "), g.assessment));
 
@@ -64,6 +84,8 @@ export function renderGuide(body: HTMLElement, ed: Editor, hooks: GuideHooks, re
         h("button", { class: "btn primary small", onclick: hooks.retryGuide }, "✨ Hent næste skridt"),
       ),
     );
+  // Spørg AI lige under det aktuelle skridt, så man ikke skal scrolle forbi historikken.
+  body.append(chat);
 
   const done = g.steps.filter((s) => s.result !== undefined);
   if (done.length) {
@@ -121,6 +143,123 @@ export function renderGuide(body: HTMLElement, ed: Editor, hooks: GuideHooks, re
 }
 
 /** Formular til at rette et tidligere svar. */
+/** "Spørg AI": spørgsmål om en måling, et skridt eller kortet – uden at det tæller som et måleresultat. */
+function chatCard(ed: Editor, hooks: GuideHooks, rerender: () => void): HTMLElement {
+  const p = ed.project;
+  const g = p.guide;
+  const current = currentGuideStep(g);
+  const options: [string, string][] = [];
+  if (current) options.push([`step:${current.id}`, `Det aktuelle skridt: ${current.title}`]);
+  g?.steps.forEach((st, i) => {
+    if (st !== current) options.push([`step:${st.id}`, `Skridt ${i + 1}: ${st.title}${st.result !== undefined ? ` (${st.skipped ? "ikke målt" : st.result})` : ""}`]);
+  });
+  p.probes.forEach((pr) => options.push([`probe:${pr.id}`, `Måling ${pr.label}${pr.measured ? `: ${pr.measured}` : ""}${pr.expected ? ` (forventet ${pr.expected})` : ""}`]));
+  options.push(["general", "Kortet generelt"]);
+  const valid = chatSubject && options.some(([v]) => v === chatSubject);
+  const subject = valid ? chatSubject! : options[0][0];
+
+  const select = h(
+    "select",
+    {
+      "aria-label": "Hvad handler spørgsmålet om?",
+      onchange: (e: Event) => {
+        chatSubject = (e.target as HTMLSelectElement).value;
+      },
+    },
+    options.map(([v, label]) => h("option", { value: v, selected: v === subject }, label)),
+  );
+  const input = h(
+    "textarea",
+    {
+      rows: 2,
+      autocomplete: "off",
+      placeholder: "fx 'Er 22,6k normalt her?', 'Hvor finder jeg GND?', 'Hvorfor stiger værdien?'",
+      oninput: (e: Event) => (chatDraft = (e.target as HTMLTextAreaElement).value),
+    },
+    chatDraft,
+  );
+  const send = () => {
+    const q = input.value.trim();
+    if (!q) return;
+    chatDraft = "";
+    chatSubject = select.value;
+    hooks.askAi(q, select.value);
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !(navigator as Navigator & { userAgentData?: { mobile?: boolean } }).userAgentData?.mobile) {
+      e.preventDefault();
+      send();
+    }
+  });
+
+  const messages = p.chat ?? [];
+  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+  return h(
+    "div",
+    { class: "card chat" },
+    h("h3", null, "💬 Spørg AI"),
+    h("p", { class: "muted small" }, "Spørg om en måling, et skridt eller kortet. Spørgsmålet tæller ikke som et måleresultat."),
+    messages.length
+      ? h(
+          "div",
+          { class: "chat-log" },
+          messages.map((m) =>
+            h(
+              "div",
+              { class: `msg ${m.role}` },
+              h("div", { class: "msg-subject" }, m.role === "user" ? `Om: ${m.subject}` : "AI"),
+              h("div", { class: "msg-text" }, m.text),
+              m.role === "assistant"
+                ? h(
+                    "div",
+                    { class: "row wrap tight" },
+                    m.points?.length ? h("button", { class: "link small", onclick: () => hooks.showChatPoints(m.id) }, `📍 Vis ${m.points.length === 1 ? "stedet" : `de ${m.points.length} steder`} på billedet`) : null,
+                    m.points?.length && ed.highlights.length && m === lastAssistant
+                      ? h(
+                          "button",
+                          {
+                            class: "link small",
+                            onclick: () => {
+                              ed.highlights = [];
+                              ed.requestDraw();
+                              rerender();
+                            },
+                          },
+                          "Skjul",
+                        )
+                      : null,
+                    g && m === lastAssistant && !g.conclusion
+                      ? h("button", { class: "link small", onclick: () => hooks.useAnswerInGuide(m.id) }, "↻ Lad guiden tage højde for svaret")
+                      : null,
+                  )
+                : null,
+            ),
+          ),
+        )
+      : null,
+    h("label", { class: "field" }, h("span", null, "Spørgsmålet handler om"), select),
+    input,
+    h(
+      "div",
+      { class: "row between" },
+      messages.length
+        ? h(
+            "button",
+            {
+              class: "link small",
+              onclick: () => {
+                if (confirm("Slet samtalen?")) hooks.clearChat();
+                rerender();
+              },
+            },
+            "Ryd samtale",
+          )
+        : h("span"),
+      h("button", { class: "btn primary small", onclick: send }, "Send ›"),
+    ),
+  );
+}
+
 function correctionForm(s: GuideStep, hooks: GuideHooks, rerender: () => void): HTMLElement {
   const input = h("textarea", { rows: 2, autocomplete: "off", "aria-label": "Rettet måleresultat" }, s.skipped ? "" : (s.result ?? ""));
   const save = (v: string) => {
