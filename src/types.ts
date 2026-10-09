@@ -206,6 +206,11 @@ export interface GuideStep {
   /** Brugerens svar. */
   result?: string;
   skipped?: boolean;
+  /** Det oprindelige svar, hvis brugeren har rettet det. */
+  correctedFrom?: string;
+  /** Målepunkt og strømvej der blev oprettet ud fra svaret (så de kan rettes med). */
+  probeId?: string;
+  traceId?: string;
   at: number;
 }
 

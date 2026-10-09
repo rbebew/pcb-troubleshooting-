@@ -1310,3 +1310,12 @@ details.card summary {
   color: var(--accent-text);
   font-weight: 700;
 }
+
+.correction textarea {
+  margin: 8px 0 4px;
+}
+.correction .probe-dot {
+  width: 16px;
+  height: 16px;
+  font-size: 0.7rem;
+}

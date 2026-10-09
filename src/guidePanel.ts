@@ -5,6 +5,8 @@ import { GUIDE_GOALS, METER_MODES, typeLabel, type Guide, type GuideGoal, type G
 export interface GuideHooks {
   startGuide: (goal: GuideGoal, description: string) => void;
   answerGuide: (result: string, skipped: boolean) => void;
+  /** Ret svaret på et tidligere skridt; AI vurderer derefter situationen igen. */
+  correctGuideAnswer: (stepId: string, result: string) => void;
   continueGuide: () => void;
   retryGuide: () => void;
   endGuide: () => void;
@@ -21,6 +23,8 @@ const QUICK_ANSWERS: Record<MeterMode, string[]> = {
 };
 
 let selectedGoal: GuideGoal = "dead";
+/** Skridt hvis svar er ved at blive rettet. */
+let editingStepId: string | null = null;
 let draftDescription = "";
 
 /** Viser begge probepunkter med luft omkring, så man kan se hvor på printet de sidder. */
@@ -69,14 +73,38 @@ export function renderGuide(body: HTMLElement, ed: Editor, hooks: GuideHooks, re
         "ol",
         { class: "guide-history" },
         done.map((s) =>
-          h(
-            "li",
-            null,
-            h("span", { class: "meter-chip" }, METER_MODES[s.mode].symbol),
-            " ",
-            s.title,
-            h("div", { class: "small" }, h("b", null, s.skipped ? "Ikke målt" : s.result), h("span", { class: "muted" }, ` · forventet ${s.expected}`)),
-          ),
+          editingStepId === s.id
+            ? h("li", null, correctionForm(s, hooks, rerender))
+            : h(
+                "li",
+                null,
+                h("span", { class: "meter-chip" }, METER_MODES[s.mode].symbol),
+                " ",
+                s.title,
+                h(
+                  "div",
+                  { class: "small row between tight" },
+                  h(
+                    "span",
+                    null,
+                    h("b", null, s.skipped ? `Ikke målt${s.result ? ` (${s.result})` : ""}` : s.result),
+                    h("span", { class: "muted" }, ` · forventet ${s.expected}`),
+                    s.correctedFrom !== undefined ? h("span", { class: "muted" }, ` · rettet fra "${s.correctedFrom}"`) : null,
+                  ),
+                  h(
+                    "button",
+                    {
+                      class: "link small",
+                      title: "Ret målingen hvis du har målt forkert",
+                      onclick: () => {
+                        editingStepId = s.id;
+                        rerender();
+                      },
+                    },
+                    "✎ Ret",
+                  ),
+                ),
+              ),
         ),
       ),
     );
@@ -89,6 +117,46 @@ export function renderGuide(body: HTMLElement, ed: Editor, hooks: GuideHooks, re
       h("span", { class: "muted small" }, `${GUIDE_GOALS[g.goal]}${g.model ? ` · ${g.model}` : ""}`),
       h("button", { class: "btn danger small", onclick: hooks.endGuide }, "Afslut guide"),
     ),
+  );
+}
+
+/** Formular til at rette et tidligere svar. */
+function correctionForm(s: GuideStep, hooks: GuideHooks, rerender: () => void): HTMLElement {
+  const input = h("textarea", { rows: 2, autocomplete: "off", "aria-label": "Rettet måleresultat" }, s.skipped ? "" : (s.result ?? ""));
+  const save = (v: string) => {
+    if (!v.trim()) return;
+    editingStepId = null;
+    hooks.correctGuideAnswer(s.id, v.trim());
+  };
+  setTimeout(() => input.focus());
+  return h(
+    "div",
+    { class: "card correction" },
+    h("div", { class: "small muted" }, `Ret måling: ${s.title}`),
+    h("div", { class: "small" }, h("span", { class: "probe-dot red" }, "+"), s.red.where, " · ", h("span", { class: "probe-dot black" }, "−"), s.black.where),
+    input,
+    h(
+      "div",
+      { class: "row wrap tight" },
+      QUICK_ANSWERS[s.mode].map((q) => h("button", { class: "chip-btn neutral", onclick: () => save(q) }, q)),
+    ),
+    h(
+      "div",
+      { class: "row between" },
+      h(
+        "button",
+        {
+          class: "btn small",
+          onclick: () => {
+            editingStepId = null;
+            rerender();
+          },
+        },
+        "Annullér",
+      ),
+      h("button", { class: "btn primary small", onclick: () => save(input.value) }, "Gem rettelse"),
+    ),
+    h("p", { class: "muted small" }, "AI får besked om rettelsen og vurderer næste skridt igen."),
   );
 }
 

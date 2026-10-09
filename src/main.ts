@@ -10,7 +10,7 @@ import { grayFromRgba, locateDetail, type Gray, type Hint } from "./register";
 import { Panel } from "./panel";
 import * as store from "./store";
 import type { SyncEvent } from "./sync";
-import { COMPONENT_TYPES, NET_PRESETS, STATUS_COLORS, uid, type DetailPhoto, type GuideGoal, type PcbComponent, type Project, type Rect } from "./types";
+import { COMPONENT_TYPES, NET_PRESETS, STATUS_COLORS, uid, type DetailPhoto, type Guide, type GuideGoal, type GuideStep, type PcbComponent, type Project, type Rect } from "./types";
 
 let settings = store.loadSettings();
 let editor: Editor | null = null;
@@ -155,6 +155,7 @@ async function openProject(id: string): Promise<void> {
       }
     },
     retryGuide: () => runGuide(),
+    correctGuideAnswer,
     endGuide,
   });
   ($("#project-name") as HTMLInputElement).value = p.name;
@@ -904,29 +905,76 @@ function answerGuide(result: string, skipped: boolean): void {
   ed.checkpoint();
   step.result = skipped ? result || "kunne ikke måles" : result;
   step.skipped = skipped;
-  const net = step.netName ? ed.project.nets.find((n) => n.name.toLowerCase() === step.netName.toLowerCase()) : undefined;
-
-  if (!skipped && (step.mode === "dc_voltage" || step.mode === "ac_voltage" || step.mode === "resistance")) {
-    // Spændings- og modstandsmålinger gemmes også som målepunkter, så de vises grønne/røde på billedet.
-    ed.project.probes.push({
-      id: uid(),
-      x: step.red.x,
-      y: step.red.y,
-      label: `G${g.steps.indexOf(step) + 1}`,
-      netId: net?.id ?? "",
-      kind: step.mode === "resistance" ? "resistance" : "voltage",
-      expected: step.expected,
-      // Svaret kan være fri tekst ("22,6k – stiger langsomt"); selve værdien bruges til grøn/rød.
-      measured: leadingValue(result) ?? result,
-      notes: leadingValue(result) && leadingValue(result) !== result.trim() ? `${step.title} – ${result}` : step.title,
-    });
-  }
-  if (!skipped && step.mode === "continuity" && /^(bip|ja|yes|beep)/i.test(result) && net) {
-    // Bekræftet forbindelse: bliver en del af strømvejen.
-    ed.project.traces.push({ id: uid(), netId: net.id, points: [{ x: step.black.x, y: step.black.y }, { x: step.red.x, y: step.red.y }] });
-  }
+  syncStepRecords(ed, g, step);
   ed.changed();
   runGuide();
+}
+
+/** Ret et tidligere svar. Målepunkt/strømvej opdateres, og AI vurderer næste skridt igen. */
+function correctGuideAnswer(stepId: string, result: string): void {
+  const ed = editor;
+  const g = ed?.project.guide;
+  const step = g?.steps.find((s) => s.id === stepId);
+  if (!ed || !g || !step || step.result === result) {
+    panel?.render();
+    return;
+  }
+  ed.checkpoint();
+  const old = step.skipped ? `kunne ikke måles (${step.result ?? ""})` : (step.result ?? "");
+  step.correctedFrom ??= old;
+  step.result = result;
+  step.skipped = false;
+  syncStepRecords(ed, g, step);
+  // Det ventende skridt og en evt. konklusion byggede på det gamle svar – AI planlægger forfra herfra.
+  const pending = currentGuideStep(g);
+  if (pending) g.steps = g.steps.filter((s) => s !== pending);
+  g.conclusion = undefined;
+  ed.changed();
+  const n = g.steps.indexOf(step) + 1;
+  runGuide(`Rettelse: Skridt ${n} ("${step.title}") blev først besvaret "${old}", men det rigtige resultat er "${result}". Vurdér situationen igen ud fra det rettede resultat.`);
+}
+
+/**
+ * Holder målepunkt og strømvej i trit med svaret på et skridt: spændings- og modstandsmålinger bliver
+ * målepunkter (grønne/røde på billedet), og en bekræftet forbindelse (bip) bliver en del af strømvejen.
+ */
+function syncStepRecords(ed: Editor, g: Guide, step: GuideStep): void {
+  const p = ed.project;
+  const result = step.result ?? "";
+  const net = step.netName ? p.nets.find((n) => n.name.toLowerCase() === step.netName.toLowerCase()) : undefined;
+  const label = `G${g.steps.indexOf(step) + 1}`;
+
+  if (step.mode === "dc_voltage" || step.mode === "ac_voltage" || step.mode === "resistance") {
+    let probe = step.probeId ? ed.probe(step.probeId) : p.probes.find((x) => x.label === label && x.notes.startsWith(step.title));
+    if (step.skipped) {
+      if (probe) p.probes = p.probes.filter((x) => x !== probe);
+      step.probeId = undefined;
+    } else {
+      if (!probe) {
+        probe = { id: uid(), x: step.red.x, y: step.red.y, label, netId: net?.id ?? "", expected: step.expected, measured: "", notes: "" };
+        p.probes.push(probe);
+      }
+      step.probeId = probe.id;
+      const value = leadingValue(result);
+      probe.kind = step.mode === "resistance" ? "resistance" : "voltage";
+      // Svaret kan være fri tekst ("22,6k – stiger langsomt"); selve værdien bruges til grøn/rød.
+      probe.measured = value ?? result;
+      probe.notes = value && value !== result.trim() ? `${step.title} – ${result}` : step.title;
+    }
+  }
+
+  if (step.mode === "continuity") {
+    const connected = !step.skipped && /^(bip|ja|yes|beep)/i.test(result.trim());
+    const existing = step.traceId ? ed.trace(step.traceId) : undefined;
+    if (connected && !existing && net) {
+      const t = { id: uid(), netId: net.id, points: [{ x: step.black.x, y: step.black.y }, { x: step.red.x, y: step.red.y }] };
+      p.traces.push(t);
+      step.traceId = t.id;
+    } else if (!connected && existing) {
+      p.traces = p.traces.filter((t) => t !== existing);
+      step.traceId = undefined;
+    }
+  }
 }
 
 async function runGuide(note?: string): Promise<void> {
@@ -1410,6 +1458,38 @@ document.addEventListener("visibilitychange", () => {
   }
 })();
 
+// ---------- Opdateringer ----------
+
+$("#app-version").textContent = `Version ${__BUILD_ID__}`;
+let updateShown = false;
+
+/** Spørger serveren om der er kommet en ny version, og tilbyder at genindlæse. */
+async function checkForUpdate(): Promise<void> {
+  if (!import.meta.env.PROD || updateShown || !navigator.onLine) return;
+  try {
+    const res = await fetch(`version.json?t=${Date.now()}`, { cache: "no-store" });
+    const v = (await res.json()) as { build?: string };
+    if (v.build && v.build !== __BUILD_ID__) {
+      updateShown = true;
+      flushSave();
+      toast("Der er en ny version af appen.", "info", 10 * 60_000, { label: "Opdatér", run: () => location.reload() });
+    }
+  } catch {
+    /* offline eller ingen version.json – prøv igen senere */
+  }
+}
+
 if ("serviceWorker" in navigator && import.meta.env.PROD) {
-  window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+  window.addEventListener("load", () => {
+    navigator.serviceWorker
+      .register("sw.js")
+      .then((reg) => {
+        document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && reg.update().catch(() => {}));
+      })
+      .catch(() => {});
+    checkForUpdate();
+  });
+  // Mobilen genoptager ofte appen uden at genindlæse den – tjek når man vender tilbage, og hver halve time.
+  document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && checkForUpdate());
+  setInterval(checkForUpdate, 30 * 60_000);
 }

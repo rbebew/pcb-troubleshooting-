@@ -636,7 +636,8 @@ export async function nextGuideStep(input: GuideInput, settings: Settings, signa
       `  Multimeter: ${m.label} (${st.range || "auto"}), strøm ${st.power === "on" ? "TIL" : "FRA"}`,
       `  Rød: ${st.red.where} (${pos(st.red)}) · Sort: ${st.black.where} (${pos(st.black)})`,
       `  Forventet: ${st.expected}`,
-      `  Resultat: ${st.skipped ? `kunne ikke måles (${st.result || "ingen grund angivet"})` : st.result || "ikke målt"}`,
+      `  Resultat: ${st.skipped ? `kunne ikke måles (${st.result || "ingen grund angivet"})` : st.result || "ikke målt"}` +
+        (st.correctedFrom !== undefined ? ` (rettet af brugeren – først angivet som "${st.correctedFrom}")` : ""),
     ].join("\n");
   });
 

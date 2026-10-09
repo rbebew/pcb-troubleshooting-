@@ -16,7 +16,7 @@ straks dukker op på computeren, og markeringer synkroniseres begge veje.
 |---|---|
 | 📷 **Kamera** | Åbner bagkameraet direkte på mobilen. Billeder roteres efter EXIF og skaleres til max 3000 px. |
 | ✨ **AI-genkendelse** | Claude finder komponenter, læser betegnelser (R12, U3 …) og påtryk, vurderer typen, noterer **synlige skader** (brændt, bulnet, revnet) og foreslår strømvejene. |
-| 🧭 **Fejlsøgningsguide** | AI guider dig med multimeteret ét skridt ad gangen: hvor den **røde** og **sorte** probe skal sættes (vist på billedet), hvilken indstilling (V, Ω, gennemgang, diodetest …), om strømmen skal være til eller fra, hvad du bør måle, og hvad resultatet betyder. Du skriver hvad du målte, og AI vælger næste skridt – til den finder den defekte komponent eller kortslutningen. Følger kendte metoder: følg strømvejen fra indgangen, modstand fra forsyning til GND, opdeling af kortsluttede skinner, spændingsfaldsmetoden og strøminjektion. Bekræftede forbindelser (bip) bliver automatisk til strømveje, og målinger gemmes som målepunkter. |
+| 🧭 **Fejlsøgningsguide** | AI guider dig med multimeteret ét skridt ad gangen: hvor den **røde** og **sorte** probe skal sættes (vist på billedet), hvilken indstilling (V, Ω, gennemgang, diodetest …), om strømmen skal være til eller fra, hvad du bør måle, og hvad resultatet betyder. Du skriver hvad du målte, og AI vælger næste skridt – til den finder den defekte komponent eller kortslutningen. Følger kendte metoder: følg strømvejen fra indgangen, modstand fra forsyning til GND, opdeling af kortsluttede skinner, spændingsfaldsmetoden og strøminjektion. Bekræftede forbindelser (bip) bliver automatisk til strømveje, og målinger gemmes som målepunkter. Har du målt forkert, kan du rette et tidligere svar (✎ Ret) – AI får besked og planlægger videre ud fra det rettede resultat. |
 | 🔬 **Små komponenter** | "Grundig" og "Meget grundig" analyse deler billedet i 2×2 eller 3×3 overlappende felter, der hver analyseres i fuld opløsning, så også 0402/0201-komponenter kommer med. Resultaterne flettes uden dubletter. Fotos gemmes i op til 4096 px. |
 | 🩺 **AI-fejlanalyse fra målepunkt** | Sæt et målepunkt hvor du har målt fejlen, skriv forventet/målt spænding og hvad der er galt, og tryk **✨ Analysér fejlen herfra**. AI følger de synlige kobberbaner fra punktet (vist stiplet), finder de forbundne komponenter, rangerer de mest sandsynlige fejlkilder og foreslår næste målinger. Banerne kan med ét tryk gøres til en rigtig strømvej. Analysen bruger automatisk det skarpeste nærbillede der viser punktet. |
 | ✂ **Automatisk beskæring** | Når du tager et nyt billede, finder appen selv printets kanter og foreslår at skære bord og baggrund væk. Kan også bruges på nærbilleder (⋯ → Beskær billedet), og AI kan finde kanterne hvis det ikke lykkes. Markeringerne flyttes med. |
@@ -73,6 +73,11 @@ projekt vinder den seneste. Du kan bruge din egen signalserver under ⚙ Indstil
 | Slet valgt | **Slet** i panelet | Delete |
 | Værktøjer | Bundlinjen | Tasterne 1–4 |
 | Fortryd / gentag | ↶ ↷ | Ctrl+Z / Ctrl+Y |
+
+## Opdateringer
+
+Appen tjekker selv om der er udgivet en ny version, når den åbnes eller man vender tilbage til den, og viser
+**Opdatér**. Versionsnummeret står nederst i ⚙ Indstillinger.
 
 ## Udvikling
 
